@@ -1,0 +1,27 @@
+{
+	"//": "Self-contained on purpose, the same way apps/server's is. Extending ../../tooling/tsconfig/app.json works here but not in the standalone cheela-search-api mirror, where that path does not exist: TypeScript reports TS5083, then every option silently falls back to its default and the build dies on module resolution. The block below is tooling/tsconfig/{base,app}.json inlined verbatim — keep it in step if that base changes.",
+	"compilerOptions": {
+		"target": "ES2023",
+		"module": "esnext",
+		"moduleResolution": "bundler",
+
+		"strict": true,
+
+		"esModuleInterop": true,
+
+		"resolveJsonModule": true,
+
+		"skipLibCheck": true,
+
+		"isolatedModules": true,
+
+		"forceConsistentCasingInFileNames": true,
+
+		"noEmit": true,
+
+		"rootDir": ".",
+		"outDir": "dist",
+		"types": ["node"]
+	},
+	"include": ["src", "test"]
+}
