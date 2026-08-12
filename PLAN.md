@@ -1,6 +1,6 @@
 # apps/search-api — build plan
 
-**Status:** Phase 0, step 2 of 7 · **Scope:** Phase 0 through Phase 2
+**Status:** Phase 0, steps 1–2 and 4 of 7 · **Scope:** Phase 0 through Phase 2
 **Consumer:** `apps/search-web`, which already speaks this service's event contract
 **Host:** Google Cloud Run
 
@@ -178,9 +178,9 @@ the suite at it. Ten tests, including four concurrent runners racing a cold
 start. Migrations are forward-only and run as their own process, not on boot:
 migrating during a cold start turns a schema change into a latency change, and
 a bad migration into an outage rather than a failed deploy step.
-→ *Gap, named rather than hidden:* CI has no Postgres service container, so
-these ten skip there. The acceptance evidence is a local run. Wiring a service
-container into `ci.yml` is the fix and it is not done.
+→ *Gap closed:* `ci.yml` now runs a `pgvector/pgvector:pg16` service container
+and sets `TEST_DATABASE_URL`, so these run on every push rather than only on
+somebody's laptop.
 
 **3 · Upstream provider interface** — `src/infra/upstream`.
 **Two vendors, wired, switchable by config.** Not "designed for two" — two.
@@ -192,7 +192,7 @@ termination, and the second one never gets added later, under pressure, when
 the first one changes its pricing. Both have free tiers, so this costs the
 interface and nothing else.
 
-**4 · Fetch and extract** — `src/domain/retrieval/fetch.ts`.
+**4 · Fetch and extract** — `src/domain/retrieval/`. — *done, with one caveat.*
 Top 6–10 candidates in parallel, through the egress client. Main-content
 extraction, boilerplate stripped, hard per-URL timeout. A slow page is dropped,
 never waited on.
@@ -200,6 +200,22 @@ never waited on.
 real pages, measured — not eyeballed. Silent extractor failures look exactly
 like model failures downstream, and this is the only place they are cheap to
 find.
+→ *Status:* 27 tests. Readability over linkedom rather than jsdom — an order of
+magnitude faster to parse, and this runs for ten pages inside a ~1.2s stage.
+Every outcome is a usable extraction or a **named reason**
+(`javascript-shell`, `no-main-content`, `too-short`, `not-html`,
+`http-error`…), which is the whole point: a client-rendered shell that extracts
+to `""` is indistinguishable downstream from a page that said nothing, and that
+mistake costs a week of blaming the model.
+→ *Caveat, and it is the reason this is "done, with one caveat":* the fixture
+set models real page shapes rather than being real pages — shipping third-party
+HTML means redistributing other people's content and carrying megabytes of it.
+A rate measured against fixtures somebody designed to pass is weaker evidence
+than one measured against pages nobody chose. Mitigated by asserting *content*
+rather than absence of failure: each shape requires the article's sentinel to
+survive and the chrome's to be gone, which an extractor returning a nav bar
+fails despite "succeeding". **Re-measure against a real corpus once the crawler
+has one, and treat these as the regression set.**
 
 **5 · Chunk, embed, rerank** — `src/domain/retrieval/rank.ts`.
 Keep ~12 passages.
