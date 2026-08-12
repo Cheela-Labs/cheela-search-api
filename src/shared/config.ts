@@ -12,33 +12,34 @@ import { z } from "zod";
  * code that reads it. A variable that is optional so the service can boot
  * without it is a variable that will be missing in production.
  */
-const schema = z.object({
-	NODE_ENV: z
-		.enum(["development", "test", "production"])
-		.default("development"),
+const schema = z
+	.object({
+		NODE_ENV: z
+			.enum(["development", "test", "production"])
+			.default("development"),
 
-	/** 3006 keeps out of the way of the five Next apps and apps/server. */
-	PORT: z.coerce.number().int().positive().default(3006),
+		/** 3006 keeps out of the way of the five Next apps and apps/server. */
+		PORT: z.coerce.number().int().positive().default(3006),
 
-	LOG_LEVEL: z
-		.enum(["fatal", "error", "warn", "info", "debug", "trace"])
-		.default("info"),
+		LOG_LEVEL: z
+			.enum(["fatal", "error", "warn", "info", "debug", "trace"])
+			.default("info"),
 
-	/**
-	 * Origins allowed to read the event stream. The surface is on its own host,
-	 * so this is a real cross-origin request and not a formality.
-	 */
-	ALLOWED_ORIGINS: z
-		.string()
-		.default("http://localhost:3005,https://search.cheelalabs.com")
-		.transform((value) =>
-			value
-				.split(",")
-				.map((origin) => origin.trim())
-				.filter(Boolean),
-		),
+		/**
+		 * Origins allowed to read the event stream. The surface is on its own host,
+		 * so this is a real cross-origin request and not a formality.
+		 */
+		ALLOWED_ORIGINS: z
+			.string()
+			.default("http://localhost:3005,https://search.cheelalabs.com")
+			.transform((value) =>
+				value
+					.split(",")
+					.map((origin) => origin.trim())
+					.filter(Boolean),
+			),
 
-	/* ---------------------------------------------------------------------
+		/* ---------------------------------------------------------------------
 	   Storage — step 2 of PLAN.md's build order.
 
 	   DATABASE_URL is required, with no default, per the rule this file opens
@@ -48,24 +49,55 @@ const schema = z.object({
 	   at import, before any test body runs.
 	   ------------------------------------------------------------------- */
 
-	DATABASE_URL: z.string().min(1, "DATABASE_URL is required"),
+		DATABASE_URL: z.string().min(1, "DATABASE_URL is required"),
 
-	/**
-	 * Multiply by `--max-instances` before raising this: that product is what
-	 * the database actually sees, and a scale-to-zero service asking for four
-	 * times what its Postgres allows fails on its first spike rather than in
-	 * a load test.
-	 */
-	DATABASE_POOL_MAX: z.coerce.number().int().positive().default(5),
+		/**
+		 * Multiply by `--max-instances` before raising this: that product is what
+		 * the database actually sees, and a scale-to-zero service asking for four
+		 * times what its Postgres allows fails on its first spike rather than in
+		 * a load test.
+		 */
+		DATABASE_POOL_MAX: z.coerce.number().int().positive().default(5),
 
-	/** Bounded below the request deadline, so a query cannot outlive its caller. */
-	DATABASE_STATEMENT_TIMEOUT_MS: z.coerce
-		.number()
-		.int()
-		.positive()
-		.default(8_000),
+		/** Bounded below the request deadline, so a query cannot outlive its caller. */
+		DATABASE_STATEMENT_TIMEOUT_MS: z.coerce
+			.number()
+			.int()
+			.positive()
+			.default(8_000),
 
-	/* ---------------------------------------------------------------------
+		/* ---------------------------------------------------------------------
+	   Upstream search — step 3 of PLAN.md's build order.
+
+	   Each credential is optional on its own; the refinement below requires at
+	   least one *complete* provider. That is the invariant worth enforcing —
+	   "this service has somewhere to search" — and it is stricter than making
+	   every key required, which would force a deploy to hold two vendors'
+	   credentials to run with one.
+	   ------------------------------------------------------------------- */
+
+		TAVILY_API_KEY: z.string().min(1).optional(),
+
+		GOOGLE_CSE_API_KEY: z.string().min(1).optional(),
+		/** The Programmable Search Engine id (`cx`), configured to search the whole web. */
+		GOOGLE_CSE_ENGINE_ID: z.string().min(1).optional(),
+
+		/**
+		 * Failover order, first to last. A name whose credentials are absent is
+		 * skipped rather than being an error, so the order can name every provider
+		 * the service might ever have and the deploy decides which exist.
+		 */
+		SEARCH_PROVIDER_ORDER: z
+			.string()
+			.default("tavily,google-cse")
+			.transform((value) =>
+				value
+					.split(",")
+					.map((name) => name.trim())
+					.filter(Boolean),
+			),
+
+		/* ---------------------------------------------------------------------
 	   Egress — step 1 of PLAN.md's build order.
 
 	   These carry defaults, unlike the credentials and connection strings the
@@ -77,23 +109,47 @@ const schema = z.object({
 	   deployment restate four numbers nobody has an opinion about.
 	   ------------------------------------------------------------------- */
 
-	/** Whole-request deadline, redirects included. */
-	EGRESS_TIMEOUT_MS: z.coerce.number().int().positive().default(10_000),
+		/** Whole-request deadline, redirects included. */
+		EGRESS_TIMEOUT_MS: z.coerce.number().int().positive().default(10_000),
 
-	/** A page above this is dropped, not truncated — see the client's comment. */
-	EGRESS_MAX_BYTES: z.coerce.number().int().positive().default(2_000_000),
+		/** A page above this is dropped, not truncated — see the client's comment. */
+		EGRESS_MAX_BYTES: z.coerce.number().int().positive().default(2_000_000),
 
-	EGRESS_MAX_REDIRECTS: z.coerce.number().int().nonnegative().default(3),
+		EGRESS_MAX_REDIRECTS: z.coerce.number().int().nonnegative().default(3),
 
+		/**
+		 * Identified, and pointing somewhere an operator can read about us. The
+		 * architecture's rule that we crawl and invoke under a name that can be
+		 * blocked starts here.
+		 */
+		EGRESS_USER_AGENT: z
+			.string()
+			.default("CheelaSearchBot/0.1 (+https://search.cheelalabs.com/bot)"),
+	})
 	/**
-	 * Identified, and pointing somewhere an operator can read about us. The
-	 * architecture's rule that we crawl and invoke under a name that can be
-	 * blocked starts here.
+	 * At least one complete upstream provider, or the service does not start.
+	 *
+	 * A search service that boots without anywhere to search is the failure this
+	 * catches: it passes every health check and answers every query with nothing,
+	 * which reads as "the index is empty" rather than "the deploy is wrong".
+	 * Google CSE needs both halves — a key without an engine id is not a
+	 * provider, it is half of one.
 	 */
-	EGRESS_USER_AGENT: z
-		.string()
-		.default("CheelaSearchBot/0.1 (+https://search.cheelalabs.com/bot)"),
-});
+	.superRefine((value, context) => {
+		const complete =
+			Boolean(value.TAVILY_API_KEY) ||
+			Boolean(value.GOOGLE_CSE_API_KEY && value.GOOGLE_CSE_ENGINE_ID);
+
+		if (!complete) {
+			context.addIssue({
+				code: "custom",
+				path: ["TAVILY_API_KEY"],
+				message:
+					"no upstream search provider is configured — set TAVILY_API_KEY, " +
+					"or both GOOGLE_CSE_API_KEY and GOOGLE_CSE_ENGINE_ID",
+			});
+		}
+	});
 
 export type Config = z.infer<typeof schema>;
 

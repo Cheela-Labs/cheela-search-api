@@ -77,6 +77,23 @@ export type EgressResponse = {
 	body: Buffer;
 };
 
+/**
+ * Per-request options.
+ *
+ * POST exists here rather than in a second HTTP client because upstream search
+ * providers are called over POST, and "one client, one policy" only holds if
+ * there is nowhere else to make a request from. A vendor endpoint is a trusted
+ * host, but it is still a public address on port 443 and the same rules apply
+ * to it — including the deadline and the size cap, which are the two that
+ * actually bite when a vendor has a bad day.
+ */
+export type EgressRequest = {
+	method?: "GET" | "POST";
+	body?: string;
+	/** Merged over the defaults. `user-agent` cannot be overridden. */
+	headers?: Record<string, string>;
+};
+
 const ALLOWED_SCHEMES = new Set(["http:", "https:"]);
 
 /**
@@ -164,6 +181,7 @@ export function createEgressClient(
 		target: URL,
 		address: string,
 		signal: AbortSignal,
+		req: EgressRequest,
 	): Promise<{
 		status: number;
 		headers: Record<string, string>;
@@ -201,7 +219,8 @@ export function createEgressClient(
 
 		try {
 			const response = await request(target, {
-				method: "GET",
+				method: req.method ?? "GET",
+				body: req.body,
 				dispatcher: agent,
 				signal,
 				// Redirects are handled by the caller loop, never here. undici does
@@ -210,9 +229,15 @@ export function createEgressClient(
 				// outside this policy, which would hand back every guarantee above
 				// at hop two.
 				headers: {
-					"user-agent": config.userAgent,
 					accept: "text/html,application/json;q=0.9,*/*;q=0.5",
 					"accept-encoding": "gzip, deflate",
+					// Caller headers override the two defaults above — an API client
+					// wants its own accept and a content-type.
+					...req.headers,
+					// Last, and deliberately after the spread: we crawl and call under
+					// a name an operator can block, and a caller able to overwrite it
+					// would make that promise unenforceable.
+					"user-agent": config.userAgent,
 				},
 			});
 
@@ -269,7 +294,10 @@ export function createEgressClient(
 	}
 
 	return {
-		async fetch(rawUrl: string): Promise<EgressResponse> {
+		async fetch(
+			rawUrl: string,
+			req: EgressRequest = {},
+		): Promise<EgressResponse> {
 			let target: URL;
 			try {
 				target = new URL(rawUrl);
@@ -315,7 +343,12 @@ export function createEgressClient(
 				const address = await pin(target.hostname, target.toString());
 
 				for (let hop = 0; hop <= config.maxRedirects; hop += 1) {
-					const result = await fetchOnce(target, address, controller.signal);
+					const result = await fetchOnce(
+						target,
+						address,
+						controller.signal,
+						req,
+					);
 
 					if (result.location === null) {
 						return {

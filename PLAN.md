@@ -1,6 +1,6 @@
 # apps/search-api — build plan
 
-**Status:** Phase 0, steps 1–2 and 4 of 7 · **Scope:** Phase 0 through Phase 2
+**Status:** Phase 0 — steps 1, 2, 4 done; step 3 awaiting live vendor responses · **Scope:** Phase 0 through Phase 2
 **Consumer:** `apps/search-web`, which already speaks this service's event contract
 **Host:** Google Cloud Run
 
@@ -182,11 +182,30 @@ a bad migration into an outage rather than a failed deploy step.
 and sets `TEST_DATABASE_URL`, so these run on every push rather than only on
 somebody's laptop.
 
-**3 · Upstream provider interface** — `src/infra/upstream`.
+**3 · Upstream provider interface** — `src/infra/upstream`. — *code done; not accepted.*
 **Two vendors, wired, switchable by config.** Not "designed for two" — two.
 Normalize both to one candidate shape.
 → *Accepts when:* the same test suite passes against either vendor with only a
 config change, and a forced failure of one falls through to the other.
+→ *Vendors:* **Tavily** and **Google Programmable Search**. Brave was the first
+choice and was dropped for a mundane reason worth recording — its free tier is
+behind a card that would not accept ours. Google CSE bills through a GCP
+project that already has a working payment method, which is the constraint that
+actually decided it. It fails independently of Tavily: different company,
+different billing, different termination risk.
+→ *SearXNG was considered and rejected.* It scrapes engines from a datacenter
+IP, which Cloud Run's ranges get blocked from fastest; being an aggregator like
+Tavily it is not really a second vendor; and running a scraper against sites
+whose terms forbid it contradicts Decision 03's own argument about consent.
+→ *Status:* 19 tests. The rotation half is fully proven — failover on error, no
+failover on an empty result set, abort stops the sweep, total failure reported
+rather than thrown, and identical behaviour whichever provider answers.
+→ **Not accepted, and the gap is specific:** both providers' request and
+response shapes were written from documentation, and their tests assert the
+shape the implementation expects. A wrong expectation passes here and fails on
+the first real call. **Acceptance needs one live response from each vendor
+reconciled against these fixtures** — until then the failure paths are proven
+and the happy path is a guess.
 → *Why both now:* a single search vendor is a single point of both cost and
 termination, and the second one never gets added later, under pressure, when
 the first one changes its pricing. Both have free tiers, so this costs the

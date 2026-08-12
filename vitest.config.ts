@@ -14,6 +14,10 @@ export default defineConfig({
 			// and skips when it is unset. Keeping them separate means a test run
 			// cannot accidentally migrate a database somebody meant to keep.
 			DATABASE_URL: "postgres://unused:unused@127.0.0.1:1/none",
+
+			// One provider, so the config refinement is satisfied. Provider tests
+			// build their own instances against fixture servers and never read this.
+			TAVILY_API_KEY: "tvly-test-not-a-real-key",
 		},
 
 		include: ["test/**/*.test.ts"],
