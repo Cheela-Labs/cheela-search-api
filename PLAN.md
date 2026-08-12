@@ -1,14 +1,18 @@
 # apps/search-api — build plan
 
 **Status:** not started · **Scope:** Phase 0 through Phase 2
-**Architecture:** `docs/capability-search-architecture.md` (rev 2, 2026-08-11)
 **Consumer:** `apps/search-web`, which already speaks this service's event contract
 **Host:** Google Cloud Run
 
 This is the query plane: query in, cited answer out, with an action layer where
-a site's manifest says one exists. The architecture document argues for the
-shape. This one says what gets built in this directory, in what order, and what
-has to be true before the next thing starts.
+a site's manifest says one exists.
+
+It is also the only architecture document for search. An earlier
+`docs/capability-search-architecture.md` argued the shape and was deleted once
+this file carried everything from it that still applied; the decisions below
+are what survived, including the two places this design overruled it. What
+follows is what gets built in this directory, in what order, and what has to be
+true before the next thing starts.
 
 ---
 
@@ -89,13 +93,14 @@ worth more than the conclusion when somebody reopens it.
 > rebuild it from scratch, and there is no mechanism by which it could favour
 > our own customers.
 >
-> **This supersedes the architecture document.** `docs/capability-search-architecture.md`
-> lists "First-party registry — Cheela's own deployed runtimes, ingested over an
-> internal API" as one of four ways manifests are found. That source is dropped.
-> Build no internal API for it. The architecture doc's reasoning for it still
-> stands on its own terms — those runtimes *are* schema-valid by construction and
-> brokered by us — and it is overruled anyway, because a second ingest path is a
-> second reader, and the second reader is the one that never gets tested.
+> **Build no internal ingest API.** The earlier design listed "first-party
+> registry — Cheela's own deployed runtimes, ingested over an internal API" as
+> one of four ways manifests are found. That source is dropped. Its reasoning
+> still stands on its own terms — those runtimes *are* schema-valid by
+> construction and brokered by us — and it is overruled anyway, because a second
+> ingest path is a second reader, and the second reader is the one that never
+> gets tested. Recorded rather than simply omitted, because it is the obvious
+> thing to propose again.
 
 ---
 
