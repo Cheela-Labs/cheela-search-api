@@ -17,9 +17,9 @@
 # default compute account.
 
 substitutions:
-  _REGION: asia-south1
+  _REGION: asia-southeast1
   _SERVICE: search-api
-  _REPO: cheela
+  _REPO: search-api
   _SERVICE_ACCOUNT: search-api@${PROJECT_ID}.iam.gserviceaccount.com
   _MIN_INSTANCES: "0"
   _MAX_INSTANCES: "4"
