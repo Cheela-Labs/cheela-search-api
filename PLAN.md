@@ -1,12 +1,13 @@
-# apps/search-api — delivery plan
+# apps/search-api — build plan
 
 **Status:** not started · **Scope:** Phase 0 through Phase 2
 **Architecture:** `docs/capability-search-architecture.md` (rev 2, 2026-08-11)
 **Consumer:** `apps/search-web`, which already speaks this service's event contract
+**Host:** Google Cloud Run
 
 This is the query plane: query in, cited answer out, with an action layer where
 a site's manifest says one exists. The architecture document argues for the
-shape; this one says what gets built in this directory, in what order, and what
+shape. This one says what gets built in this directory, in what order, and what
 has to be true before the next thing starts.
 
 ---
@@ -14,18 +15,87 @@ has to be true before the next thing starts.
 ## What this service is, and what it is not
 
 **It is** the request path. Route the query, retrieve, rank, compose, stream.
-One process, stateless, horizontally scalable, holding no session.
+One stateless process, holding no session.
 
-**It is not** the crawler. Manifest probing and content crawl-ahead run on their
-own schedule against the same database and belong in `apps/crawler`. Putting
-them here would tie a background job's memory profile and failure modes to the
-latency of a user-facing request, and the first slow crawl would take the search
-box down with it.
+**It is not** the crawler. Manifest fetching and content crawl-ahead run on
+their own schedule against the same database and belong in `apps/crawler`.
+Putting them here would tie a background job's memory profile and failure modes
+to the latency of a user-facing request, and the first slow crawl would take the
+search box down with it.
 
-**It is not** the control plane. `apps/server` learns nothing about search
-beyond an ingest endpoint for first-party runtimes. Different blast radius,
-different backup needs, different scaling curve — a bad crawl must not be able
-to reach billing.
+**It is not** the control plane. `apps/server` and this service do not talk. See
+Decision 03 — that is a stronger position than it was, and it is deliberate.
+
+---
+
+## Decisions
+
+Recorded because each one closes a question that was open, and the reasoning is
+worth more than the conclusion when somebody reopens it.
+
+> ### Decision 01 — Rent the index. Own the query log.
+> **2026-08-12.** No Common Crawl, no owned corpus, not yet. We have neither the
+> budget nor the infrastructure, and a monthly crawl is stale for exactly the
+> queries the action layer exists to serve.
+>
+> What we own instead is the **query log**, and it is a different object from
+> the query cache. The cache expires in hours because rankings move. The log
+> never expires, because it is the list of domains to crawl first on the day
+> owning an index becomes affordable — weighted by real demand, which is better
+> targeting than any ranked domain list would have given us.
+>
+> Break-even against a rented search API lands near **100k queries/month**.
+> Below that, renting wins outright. Revisit there, with a log that says exactly
+> what to fetch.
+
+> ### Decision 02 — Google Cloud Run, and the SSRF policy is now the highest-severity code here.
+> **2026-08-12.** Cloud Run streams responses properly, which SSE needs, and
+> scales to zero, which matters while the budget is the constraint. Deploys from
+> the `cheela-search-api` mirror like every other app.
+>
+> The consequence that matters: **`169.254.169.254` is GCP's metadata server and
+> it hands out service-account access tokens.** This service fetches
+> attacker-influenceable URLs — result URLs from an SEO-manipulable index, and
+> `endpoint.address` out of manifests written by strangers. On this host an SSRF
+> that reaches the metadata endpoint is credential theft, not an internal port
+> scan. The egress client is built first, for this reason.
+
+> ### Decision 03 — Capabilities come from the published manifest. This service never asks the control plane.
+> **2026-08-12.** Every capability we index is read from
+> `/.well-known/agent-discovery.json` over HTTPS, from the site's own domain, by
+> the same code for every site. There is no private ingest from `apps/server`,
+> and there is no domain hint from it either.
+>
+> Three reasons, in order of how much they matter:
+>
+> 1. **The tolerant reader gets exercised on every ingest.** ADS is an open
+>    spec; implementations in the wild will be nothing like ours. A reader that
+>    only runs against rare third-party files is undertested and breaks the
+>    first time it matters. Routing our own customers through it means it runs
+>    constantly, against real files, for people we can call when it goes wrong.
+> 2. **The published file is what every other agent sees.** Our database and
+>    that URL can disagree. Indexing the database means indexing something no
+>    one outside Cheela can observe.
+> 3. **Publishing the file is the consent.** `cheela manifest pull` writes
+>    `public/.well-known/agent-discovery.json`
+>    (`packages/cli/src/bin.ts:10`), and shipping it is an affirmative public
+>    act. A row in our database is not. This is why there is no dashboard
+>    opt-in: the spec already has one.
+>
+> **Known cost, accepted:** a Cheela customer's capabilities appear only once
+> their domain turns up in a result set, is reached by the DNS sweep, or is
+> submitted. That is slower than an internal feed would be. In exchange the
+> capability index is built entirely from public, observable data — anyone could
+> rebuild it from scratch, and there is no mechanism by which it could favour
+> our own customers.
+>
+> **This supersedes the architecture document.** `docs/capability-search-architecture.md`
+> lists "First-party registry — Cheela's own deployed runtimes, ingested over an
+> internal API" as one of four ways manifests are found. That source is dropped.
+> Build no internal API for it. The architecture doc's reasoning for it still
+> stands on its own terms — those runtimes *are* schema-valid by construction and
+> brokered by us — and it is overruled anyway, because a second ingest path is a
+> second reader, and the second reader is the one that never gets tested.
 
 ---
 
@@ -33,25 +103,22 @@ to reach billing.
 
 `src/shared/events.ts` is the wire format, and `apps/search-web` consumes it
 today against its own fixture corpus. That ordering was deliberate: the surface
-exists, so every phase below has a working consumer to be tested against rather
+exists, so every step below has a working consumer to be tested against rather
 than a mock.
 
-Two properties of the contract are load-bearing and neither is negotiable
-during implementation:
+Two properties are load-bearing and neither is negotiable during
+implementation:
 
 1. **Sources and capability events are emitted before the first answer block.**
    The capability lookup is a hash join on domains that have already arrived; it
    completes roughly two seconds before composition does. A pipeline that
-   batches its output throws that away, and the surface has no way to get it
-   back.
-2. **`error` is a frame, not a status code.** A 500 tells the surface that
-   something failed; an error event tells the person what. The stub in
-   `src/app.ts` already answers this way, which is why the two halves can be
-   wired together before either is finished.
+   batches its output throws that away and the surface cannot get it back.
+2. **`error` is a frame, not a status code.** A 500 tells the surface something
+   failed; an error event tells the person what.
 
-Changes go in this file first. This side produces events; a producer emitting
-something the consumer has not learned to read is the recoverable direction, and
-the reverse is a blank screen.
+Contract changes go in this file first. A producer emitting something the
+consumer has not learned to read is the recoverable direction; the reverse is a
+blank screen.
 
 ---
 
@@ -62,49 +129,108 @@ useful on its own.
 
 ### Build order
 
-1. **Egress client** (`src/infra/egress`). One client, one policy, used by every
-   outbound fetch in both planes. Resolve DNS first and reject RFC1918,
-   loopback, link-local and `169.254.169.254`; pin the resolved IP so DNS cannot
-   rebind between check and connect; refuse cross-host redirects; cap response
-   size and wall-clock time. Two implementations means one of them is wrong, so
-   this is first and everything else is built on top of it.
-2. **Upstream provider interface** (`src/infra/upstream`) with **two vendors
-   behind it from day one**. Not "designed for two" — two, wired, switchable by
-   config. A single search vendor is a single point of both cost and
-   termination, and the second one never gets added under pressure.
-3. **Fetch and extract** the top 6–10 candidates in parallel. Main-content
-   extraction, boilerplate stripped, hard per-URL timeout. A slow page is
-   dropped, never waited on.
-4. **Chunk, embed, rerank** against the query. Keep ~12 passages.
-5. **Compose** with a citation per claim, streamed as blocks.
-6. **The three caches**, instrumented from the first commit.
-7. **Eval harness** and its 200 labeled queries.
+Numbered because the order is the argument. Each step's acceptance criterion is
+the thing that has to be demonstrably true before the next one starts.
 
-### The three caches
+**0 · Deployable skeleton.**
+`Dockerfile`, Cloud Run service, a dedicated service account with the narrowest
+roles that work, secrets in Secret Manager, deploy from the mirror.
+→ *Accepts when:* `/health` answers on a Cloud Run URL, deployed by CI from
+`cheela-search-api`, and the service account can read its secrets and nothing
+else.
+→ *Why first:* "it deploys" is the single most painful thing to retrofit, and
+every step after this is easier to trust when you can ship it.
 
-| Cache | Key | TTL | Why |
+**1 · Egress client** — `src/infra/egress`.
+One client, one policy, every outbound request in both planes. Resolve DNS
+first and reject RFC1918, loopback, link-local and `169.254.169.254`. Pin the
+resolved IP so nothing can rebind between check and connect. Refuse cross-host
+redirects. Cap response size and wall-clock time.
+→ *Accepts when:* a test suite proves refusal of each of — metadata endpoint,
+private ranges, loopback, link-local, a cross-host redirect chain, an oversized
+body, a slow-loris body, and a hostname that resolves differently on the second
+lookup.
+→ *Why second:* every remaining step makes outbound calls. Build fetch-and-
+extract first and the policy gets bolted on afterwards with one path missed.
+Two implementations means one of them is wrong.
+
+**2 · Storage** — `src/infra/db`, migrations.
+Postgres 16 with pgvector, `web` schema. `query_log` lands here, in this step,
+permanent and unlinked from any user identity.
+→ *Accepts when:* migrations run clean forward on an empty database and the
+schema matches the tables below.
+
+**3 · Upstream provider interface** — `src/infra/upstream`.
+**Two vendors, wired, switchable by config.** Not "designed for two" — two.
+Normalize both to one candidate shape.
+→ *Accepts when:* the same test suite passes against either vendor with only a
+config change, and a forced failure of one falls through to the other.
+→ *Why both now:* a single search vendor is a single point of both cost and
+termination, and the second one never gets added later, under pressure, when
+the first one changes its pricing. Both have free tiers, so this costs the
+interface and nothing else.
+
+**4 · Fetch and extract** — `src/domain/retrieval/fetch.ts`.
+Top 6–10 candidates in parallel, through the egress client. Main-content
+extraction, boilerplate stripped, hard per-URL timeout. A slow page is dropped,
+never waited on.
+→ *Accepts when:* extraction success rate is above 0.90 on a fixture set of
+real pages, measured — not eyeballed. Silent extractor failures look exactly
+like model failures downstream, and this is the only place they are cheap to
+find.
+
+**5 · Chunk, embed, rerank** — `src/domain/retrieval/rank.ts`.
+Keep ~12 passages.
+→ *Accepts when:* recall on the labeled set clears the bar, and the numbers are
+per-stage rather than end-to-end.
+
+**6 · Compose and stream** — `src/domain/compose`, `src/interface/search.ts`.
+Citation per claim. Emit blocks as they are produced.
+→ *Accepts when:* `apps/search-web` renders a real streamed answer against this
+service with its fixture corpus disabled. That is the integration test — the
+consumer already exists, so use it.
+
+**7 · The three caches, plus the log.**
+→ *Accepts when:* hit rate is on a dashboard, from the first day it can be.
+
+**Parallel track — the eval harness.** The 200 labeled queries are a writing
+task, not a coding one; start them at step 0. The harness code lands at step 2.
+Every stage here has a plausible-sounding improvement that makes end-to-end
+quality worse — a better embedding model that loses proper nouns, a cheaper
+extractor that drops the answer. Without per-stage measurement you will ship all
+of them and be unable to tell which one did the damage.
+
+### The three caches, and the log
+
+| Object | Key | Lifetime | Why |
 |---|---|---|---|
-| Query → URLs | normalized query + provider | short | Rankings move |
-| URL → extracted content | canonical URL | long, revalidated | Pages mostly do not |
-| Chunk → embedding | `(content_hash, model_version)` | permanent | Embedding the same paragraph twice is pure waste |
+| Query cache | normalized query + provider | Short TTL | Rankings move |
+| Content cache | canonical URL | Long, revalidated | Pages mostly do not |
+| Embedding cache | `(content_hash, model_version)` | Permanent | Embedding the same paragraph twice is pure waste |
+| **Query log** | — | **Permanent, never expires** | The seed corpus for Decision 01 |
 
-The second is the strategic one. It fills along the shape of real traffic, so
-head queries go warm quickly and the upstream bill flattens against volume
-rather than tracking it.
+The content cache is the strategic one: it fills along the shape of real
+traffic, so head queries go warm quickly and the upstream bill flattens against
+volume rather than tracking it.
 
-**Cache hit rate decides unit economics outright at MVP** — the dominant cost per
-query is upstream API calls and page fetches, not model tokens and not vector
-search. Instrument it before optimizing retrieval quality, not after.
+**Cache hit rate decides unit economics outright at MVP** — the dominant cost
+per query is upstream API calls and page fetches, not model tokens and not
+vector search. Instrument it before optimizing retrieval quality, not after.
+
+**The query log is not the query cache.** Storing them as one object with one
+TTL throws away the asset. And because queries are sensitive — health, legal,
+financial, personal — the log is stored unlinked from any user identity,
+normalized, with a retention policy written before the first row lands. Cheap
+now, expensive to retrofit against a year of logs.
 
 ### Gate out of Phase 0
 
-- Answer correctness > 0.80 (judge, with weekly human spot-checks to keep the
-  judge honest)
-- Citation faithfulness > 0.95 — does the cited passage actually support the
-  claim
-- Extraction success rate > 0.90 — silent extractor failures look exactly like
-  model failures
-- Content cache hit rate > 0.55
+| Metric | Bar |
+|---|---|
+| Answer correctness (judge + weekly human spot-check) | > 0.80 |
+| Citation faithfulness — does the cited passage support the claim | > 0.95 |
+| Extraction success rate | > 0.90 |
+| Content cache hit rate | > 0.55 |
 
 If the search engine is not good, no action layer rescues it.
 
@@ -116,18 +242,55 @@ If the search engine is not good, no action layer rescues it.
 by domain. Nothing is invoked; this phase is pure information gain and carries
 no execution risk.
 
-- Tolerant manifest reader with the five-outcome result type. An unrecognized
-  `transport` or `auth` **does not remove a capability from the index** — we
-  cannot call it, but the site still does this and the user should still be told.
-- Unknown fields and `extensions` stored verbatim. A field dropped today is a
-  feature that cannot ship tomorrow without a full re-crawl.
-- A major `specVersion` ahead of ours stops the read. Do not guess at a document
-  written to rules we have not seen.
-- Enrichment: 8–15 intent phrases per capability, embedded individually, **never
-  the identifier**. `com.example.lookupOrder` is a poor retrieval target for
-  "where's my package" and no amount of embedding-model shopping closes that gap.
-- Hybrid retrieval — lexical on provider names, dense on phrases, structured
-  predicates on transport, auth, effects tier and trust, **in one statement**.
+### Where manifests come from
+
+Three sources, and per Decision 03 the control plane is not among them.
+
+| Source | Cost | Notes |
+|---|---|---|
+| **Opportunistic, from traffic** | One GET per domain, ~1 KB | Every domain in a result set is queued for a probe. Weighted by what people actually search for, which beats any static ranking list |
+| **DNS `TXT` sweep** at `_agent-discovery.<domain>` | Cheaper than the GET | Wide coverage the traffic stream will not reach for months |
+| **Submission** | Free | Low volume, high intent, and it doubles as the domain-verification funnel — and it is the fast path for a Cheela customer, the same fast path anyone gets |
+
+All of it runs in the crawler, as a scheduled Cloud Run Job. **None of it runs
+on the request path.** A manifest fetched during a query would blow the 60 ms
+capability-lookup budget and the "chips visible before the answer" argument with
+it. Fetched out of band; read from the index at query time as a hash join on
+domain.
+
+### Reading a spec written by strangers
+
+The reader is built on the Ajv instance and vendored schema already in
+`@cheela/adp`, depended on by published semver range the way `apps/server` does
+it — not `workspace:`, which cannot resolve in the mirror.
+
+- **An unrecognized `transport` or `auth` does not remove a capability from the
+  index.** We cannot call it, but the site still does this and the user should
+  still be told. Not-invocable-by-us is a property of the result, not a reason
+  to hide it.
+- **Round-trip unknown fields and `extensions` verbatim.** A field dropped today
+  is a feature that cannot ship tomorrow without a full re-crawl.
+- **`description`, `inputSchema` and `outputSchema` are all optional.** Handle
+  the degenerate case first — a name, a version and an endpoint — because it
+  will be common in hand-written manifests.
+- **Never assume our own shape.** `endpoint.address` is any non-empty string.
+  `invocationName` may be absent; derive it by the spec's rule, not ours. Do not
+  expect Cheela's broker URL pattern and do not treat its absence as a defect.
+- **A major `specVersion` ahead of ours stops the read.**
+- **`404` is the normal outcome and never an alert.** Recheck in 30 days.
+  Conditional requests — ETag and Last-Modified — on every re-fetch.
+
+### Enrichment
+
+Generate 8–15 intent phrases per capability and embed each one. **Never embed
+the identifier.** `com.example.lookupOrder` is a poor retrieval target for
+"where's my package", and no amount of embedding-model shopping closes that gap.
+Retrieval matches a phrase and resolves to its capability, max-pooled. One call
+per capability per content-hash change.
+
+Enrichment also derives the effects tier, an argument profile, an injection
+verdict on the free text, and a canonical summary so the UI never renders
+operator-written prose verbatim.
 
 > **Invariant.** Manifest text can only *lower* a capability's privilege, never
 > raise it. The effects tier is ours, derived from structure — the verb in the
@@ -138,38 +301,36 @@ no execution risk.
 **Gate:** capability recall@50 > 0.92, and chips visibly ahead of the answer in
 the streamed response — which the surface will show you directly.
 
-Phase 1 also measures the thing the whole product bets on: chips are rendered
-and nothing is invoked, so click-through tells you the real demand for actions
-before the invoker exists. That measurement is the actual purpose of this phase.
+Phase 1 also measures the thing the product bets on: chips render and nothing is
+invoked, so click-through tells you the real demand for actions before the
+invoker exists. That measurement is the actual purpose of this phase.
 
 ---
 
 ## Phase 2 · Action — ~3 weeks
 
 **Read-only calls, narrowest possible surface.** Transport we speak, auth we can
-satisfy, domain verified, `read` tier, schema present. In practice that means
-Cheela's own broker plus early ADS adopters.
+satisfy, domain verified, `read` tier, schema present.
 
 - Planner and binder, with **Ajv pre-validation against the declared
-  `inputSchema` before any network call, always, including at `read` tier**. Use
-  the Ajv instance already in `@cheela/adp` rather than a second one.
-- A validation failure is **a UI state, not an error**: it means a required
-  argument is missing, so render the card with a field for it and stop.
-- No `inputSchema` at all is permitted and common in hand-written manifests.
-  Unvalidatable input is `unknown` effects tier by definition and cannot be
-  auto-invoked.
+  `inputSchema` before any network call, always, including at `read` tier.**
+- A validation failure is **a UI state, not an error**: a required argument is
+  missing, so render the card with a field for it and stop.
+- No `inputSchema` at all is permitted and common. Unvalidatable input is
+  `unknown` effects tier by definition and cannot be auto-invoked.
 - Budgets: max 3 invocations per query, max 1 provider unless the query names
-  several, hard wall-clock ceiling per stage, per-provider circuit breaker.
+  several, hard wall-clock ceiling per stage, per-provider circuit breaker,
+  results cached on `(capability_id, canonical_input_hash)`.
 - **Retrieval and action must not share a context window.** This is the
   structural defense against injection from page content, and it is why
   composition happens after invocation rather than around it. Nothing retrieved
   may influence the planner's policy or the gate.
 
-> **Invoking someone's capability spends their money.** Read
-> `apps/server/src/domain/capability/invoke-capability.ts` — a broker call is
-> metered against the *runtime owner*. Identified user agent, robots honored,
-> opt-out via a manifest extension, never invoke during crawl, and an
-> operator-facing log of every call we made and why.
+> **Invoking someone's capability spends their money.**
+> `apps/server/src/domain/capability/invoke-capability.ts` meters a broker call
+> against the *runtime owner*. Identified user agent, robots honored, opt-out
+> via a manifest extension, never invoke during crawl, and an operator-facing
+> log of every call we made and why.
 
 **Gate:** zero ungated invocations across the full eval suite plus a red-team
 pass. This one does not negotiate.
@@ -186,22 +347,54 @@ quarter. It is a compliance project wearing an engineering costume.
 
 ## Storage
 
-Postgres 16 with pgvector, two schemas in one instance — `web` and
-`capability`. Split so the web side can move out later without touching the
-capability side. `docker-compose.yml` already runs Postgres 16 for SuperTokens,
-so local dev costs one more database on a container that is already there.
+Postgres 16 with pgvector. Two schemas, one instance — `web` and `capability` —
+split so the web side can move out later without touching the capability side.
+`docker-compose.yml` already runs Postgres 16 for SuperTokens, so local dev
+costs one more database on a container that is already there.
 
-Not the control plane's Mongo, for any of it.
+Not the control plane's Mongo, for any of it. Different blast radius, different
+backup needs, different scaling curve; a bad crawl must not be able to reach
+billing.
 
-Resist a dedicated vector store on the capability side specifically: those
-queries need lexical, dense and structured predicates in one statement, and a
-vector database makes the predicates a post-filter — which wrecks recall exactly
-when the filter is selective, and here it always will be.
+```sql
+-- ─── web plane ───
+documents      (url, canonical_url, domain, title, extracted_text,
+                content_hash, fetched_at, etag, expires_at, http_status)
+passages       (id, document_id, ordinal, text, content_hash,
+                embedding vector(1024), model_version)   -- HNSW, cosine
+query_cache    (query_hash, normalized_query, provider, result_urls[],
+                fetched_at, expires_at)
+query_log      (id, normalized_query, occurred_at, result_domains[])
+                -- permanent; no user id, no session id, no address
+
+-- ─── capability plane ───
+sites          (domain, discovery_method, robots_state, adp_state,
+                domain_verified_at, trust_score, next_probe_at)
+                -- `domain` is the join key to documents.domain
+manifests      (id, site_id, url, raw_json, content_hash, spec_version,
+                fetched_at, etag, valid, validation_errors,
+                signature_state, unknown_fields)   -- kept, never dropped
+capabilities   (id, manifest_id, provider_id, name, invocation_name, version,
+                description, input_schema, output_schema,
+                transport, auth, address, extensions, deprecated,
+                invocable_by_us, content_hash, tsv tsvector)
+enrichment     (capability_id, summary, intent_phrases[], effects_tier,
+                arg_profile, injection_verdict, model_version, enriched_at)
+phrase_vectors (capability_id, phrase, embedding vector(1024), model_version)
+invocations    (id, capability_id, query_id, input_hash, status, latency_ms,
+                output_conforms_to_schema, cached_until)
+```
 
 **The whole cross-plane integration is `documents.domain → sites.domain`.** Keep
 it that way. Every temptation to make the join smarter buys marginal precision
 and costs the property that either plane can be rebuilt, replaced or emptied
 without the other noticing.
+
+Resist a dedicated vector store on the capability side specifically: those
+queries need lexical matching on provider names, dense matching on phrases, and
+structured predicates on transport, auth, effects tier and trust *in one
+statement*. A vector database makes the predicates a post-filter, which wrecks
+recall exactly when the filter is selective — and here it always will be.
 
 ---
 
@@ -213,12 +406,16 @@ arrives as a required field at the same time as the code that reads it.** A
 variable made optional so the service can boot without it is a variable that
 will be missing in production.
 
-| Phase | Adds |
+| Step | Adds |
 |---|---|
 | now | `PORT`, `LOG_LEVEL`, `ALLOWED_ORIGINS`, `NODE_ENV` |
-| 0 | `DATABASE_URL`, two upstream provider keys, embedding + rerank model pins, per-stage LLM model pins, egress timeout and size caps |
-| 1 | crawler ingest token, enrichment model pin |
-| 2 | broker base URL, per-provider budget ceilings |
+| 1 | egress timeout, max body size, DNS resolver pin |
+| 2 | `DATABASE_URL` |
+| 3 | two upstream provider keys, provider order |
+| 5 | embedding + rerank model pins |
+| 6 | composer model pin |
+| Phase 1 | enrichment model pin, crawler ingest token |
+| Phase 2 | broker base URL, per-provider budget ceilings |
 
 For the LLM stages go through `@cheela/provider` rather than a vendor SDK.
 Routing, reranking, planning and composition have genuinely different cost and
@@ -234,12 +431,7 @@ change your mind about all four.
 standalone from their own mirrors, so TypeScript cannot catch a drift between
 them. A test on the bytes can.
 
-Build the eval harness in week one. Every stage here has a plausible-sounding
-improvement that makes end-to-end quality worse — a better embedding model that
-loses proper nouns, a cheaper extractor that drops the answer, a smarter planner
-that invokes more. Without per-stage measurement you will ship all of them and
-be unable to tell which one did the damage. Two hundred labeled queries is a
-couple of days and it is the line between engineering and vibes.
+The egress client gets an adversarial suite, not a happy-path one. See step 1.
 
 **Ungated invocations is a release blocker at any value above zero.** It is not
 a quality metric and it does not get traded against anything.
@@ -248,21 +440,20 @@ a quality metric and it does not get traded against anything.
 
 ## Open questions
 
-These are genuinely undecided, not rhetorical.
-
-- **Which two upstream providers.** The interface is fixed by Phase 0 step 2;
-  the vendors are not. Pick on cost per thousand queries and on termination
-  risk, not on snippet quality — we do not use their snippets.
-- **Where this deploys.** `apps/server` and the Next apps have a documented
-  path in `deployment.md`; this one has none yet. It holds long-lived streaming
-  connections and talks to Postgres, which rules out some of the hosts the
-  static sites use.
-- **Whether the crawler is a second app or a second entrypoint here.** Separate
-  app is the stated position and the reasoning above stands, but it costs a
-  second deploy target and a second mirror, and that is worth re-arguing once
+- **Which two upstream providers.** The interface is fixed by step 3; the
+  vendors are not. Pick on cost per thousand queries and on termination risk,
+  not on snippet quality — we do not use their snippets.
+- **Whether the crawler is a second app or a second Cloud Run Job here.**
+  Separate app is the stated position and the reasoning above stands, but it
+  costs a second deploy target and a second mirror. Worth re-arguing once
   Phase 1 has a real crawl volume to reason about.
 - **Vertical.** "As good as the others, plus buttons" is not a reason to switch
-  search engines. The mitigation in the architecture doc is to pick a vertical
-  where actions are the point — commerce, travel, support, local services — and
-  be the best engine in it. That choice is not made, and Phase 1's click-through
-  data is what should make it.
+  search engines. The mitigation is to pick a vertical where actions are the
+  point — commerce, travel, support, local services — and be the best engine in
+  it. Not decided, and Phase 1's click-through data is what should decide it.
+
+### Answered
+
+- ~~Where this deploys~~ → Decision 02, Cloud Run.
+- ~~Whether to own the index~~ → Decision 01, deferred; query log is the path back.
+- ~~How manifests are found~~ → Decision 03, published file only, no control-plane path.
