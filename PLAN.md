@@ -226,15 +226,25 @@ Every outcome is a usable extraction or a **named reason**
 `http-error`…), which is the whole point: a client-rendered shell that extracts
 to `""` is indistinguishable downstream from a page that said nothing, and that
 mistake costs a week of blaming the model.
-→ *Caveat, and it is the reason this is "done, with one caveat":* the fixture
-set models real page shapes rather than being real pages — shipping third-party
-HTML means redistributing other people's content and carrying megabytes of it.
-A rate measured against fixtures somebody designed to pass is weaker evidence
-than one measured against pages nobody chose. Mitigated by asserting *content*
-rather than absence of failure: each shape requires the article's sentinel to
-survive and the chrome's to be gone, which an extractor returning a nav bar
-fails despite "succeeding". **Re-measure against a real corpus once the crawler
-has one, and treat these as the regression set.**
+→ *The caveat was right, and it caught a real bug.* The fixture set models page
+shapes rather than being real pages, and a rate measured against fixtures
+somebody designed to pass is weak evidence. Measured against the live web for
+the first time on 2026-08-13, it scored **1 page in 8** where the fixtures
+scored 8 in 8. Cause: the egress client advertised `accept-encoding` and undici's
+`request()` does not decompress — unlike `fetch()` — so the extractor was handed
+gzip. It failed *quietly and downstream*, reporting `no-main-content` on
+ordinary articles, which reads as an extraction problem rather than a transport
+one. Fixed; the same query now scores **0.63**.
+→ *The 0.90 gate needs redefining before it can be met, and not by improving
+extraction.* The remaining failures on that run were one client-rendered page
+(reddit) and two 403s from bot detection (medium, stackoverflow). Those are
+different in kind: a 403 is a site declining to be read by an identified bot,
+and **we do not spoof a browser user agent to get around it** — that would
+contradict Decision 03's argument about consent and the plan's own rule that we
+crawl under a name an operator can block. So `extracted / requested` measures how
+many sites block bots as much as it measures extraction. **Redefine the metric
+over pages that did not refuse us**, and count refusals separately, before
+treating 0.90 as reachable.
 
 **5 · Chunk, embed, rerank** — `src/domain/retrieval/`. — *chunk and rank done; embed deferred.*
 Keep ~12 passages.

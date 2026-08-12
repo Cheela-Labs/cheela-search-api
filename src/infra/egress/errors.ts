@@ -16,6 +16,8 @@ export type EgressRefusal =
 	| "cross-host-redirect"
 	| "too-many-redirects"
 	| "response-too-large"
+	/** Advertised an encoding it then did not send, or sent a corrupt one. */
+	| "decode-failed"
 	| "timeout"
 	| "request-failed";
 

@@ -1,5 +1,12 @@
 import { lookup as dnsLookup } from "node:dns/promises";
 import type { Readable } from "node:stream";
+import { promisify } from "node:util";
+import {
+	brotliDecompress as brotliDecompressCb,
+	gunzip as gunzipCb,
+	inflate as inflateCb,
+	inflateRaw as inflateRawCb,
+} from "node:zlib";
 import { Agent, request } from "undici";
 import { type AddressVerdict, classifyAddress } from "./addresses";
 import { EgressError } from "./errors";
@@ -118,6 +125,72 @@ function discardBody(body: Readable): void {
 	body.destroy();
 }
 
+const gunzip = promisify(gunzipCb);
+const inflate = promisify(inflateCb);
+const inflateRaw = promisify(inflateRawCb);
+const brotliDecompress = promisify(brotliDecompressCb);
+
+/**
+ * Decodes a compressed response body.
+ *
+ * undici's `request()` does not do this — unlike `fetch()`, which does — so a
+ * client that advertises `accept-encoding` and then reads `body` gets the
+ * compressed bytes. It fails *quietly and downstream*: the extractor is handed
+ * binary, finds no article, and reports `no-main-content`, so the symptom is a
+ * plausible-looking extraction failure on ordinary pages rather than anything
+ * pointing at transport. It cost most of the corpus before it was noticed, and
+ * only because a real run scored 1 page out of 8 where the fixtures scored 8
+ * out of 8.
+ *
+ * `maxOutputLength` is not optional. The size cap upstream of this counts bytes
+ * *on the wire*, and a kilobyte of gzip expands to a gigabyte if you let it —
+ * capping only the compressed size is an open invitation.
+ */
+async function decode(
+	body: Buffer,
+	encoding: string | undefined,
+	maxBytes: number,
+	url: string,
+): Promise<Buffer> {
+	const name = (encoding ?? "").trim().toLowerCase();
+	if (!name || name === "identity" || body.length === 0) return body;
+
+	const options = { maxOutputLength: maxBytes };
+
+	try {
+		if (name === "gzip" || name === "x-gzip") return await gunzip(body, options);
+		if (name === "br") return await brotliDecompress(body, options);
+		if (name === "deflate") {
+			// Servers disagree about whether `deflate` means zlib-wrapped or raw,
+			// and both are common enough that guessing one loses pages.
+			try {
+				return await inflate(body, options);
+			} catch {
+				return await inflateRaw(body, options);
+			}
+		}
+	} catch (error) {
+		const detail = error instanceof Error ? error.message : String(error);
+		// Matched on `code`, not on the message: zlib reports the output cap as
+		// `RangeError: Cannot create a Buffer larger than N bytes`, which says
+		// nothing a substring check would recognise as a size limit. That is the
+		// zip-bomb case and belongs with the other size refusals rather than
+		// looking like a corrupt stream.
+		if ((error as NodeJS.ErrnoException)?.code === "ERR_BUFFER_TOO_LARGE") {
+			throw new EgressError(
+				"response-too-large",
+				url,
+				`decompressed body exceeded ${maxBytes} bytes`,
+			);
+		}
+		throw new EgressError("decode-failed", url, `${name}: ${detail}`);
+	}
+
+	// An encoding we do not implement. Returned as-is so extraction refuses it
+	// as `not-html` rather than this throwing on something possibly harmless.
+	return body;
+}
+
 async function systemResolve(hostname: string): Promise<string[]> {
 	const results = await dnsLookup(hostname, { all: true, verbatim: true });
 	return results.map((entry) => entry.address);
@@ -230,7 +303,7 @@ export function createEgressClient(
 				// at hop two.
 				headers: {
 					accept: "text/html,application/json;q=0.9,*/*;q=0.5",
-					"accept-encoding": "gzip, deflate",
+					"accept-encoding": "gzip, deflate, br",
 					// Caller headers override the two defaults above — an API client
 					// wants its own accept and a content-type.
 					...req.headers,
@@ -282,11 +355,22 @@ export function createEgressClient(
 				chunks.push(buffer);
 			}
 
+			const decoded = await decode(
+				Buffer.concat(chunks),
+				headers["content-encoding"],
+				config.maxBytes,
+				target.toString(),
+			);
+
+			// The body is no longer encoded, so the header must not claim it is —
+			// a caller that trusts it would decompress twice.
+			delete headers["content-encoding"];
+
 			return {
 				status: response.statusCode,
 				headers,
 				location: null,
-				body: Buffer.concat(chunks),
+				body: decoded,
 			};
 		} finally {
 			await agent.close().catch(() => {});
