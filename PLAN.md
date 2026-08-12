@@ -1,6 +1,6 @@
 # apps/search-api — build plan
 
-**Status:** Phase 0 — steps 1, 2, 4 done; step 3 awaiting live vendor responses · **Scope:** Phase 0 through Phase 2
+**Status:** Phase 0 — steps 1, 2, 4 done; 3 and 5 code-done, awaiting vendor keys and an eval set · **Scope:** Phase 0 through Phase 2
 **Consumer:** `apps/search-web`, which already speaks this service's event contract
 **Host:** Google Cloud Run
 
@@ -236,10 +236,27 @@ survive and the chrome's to be gone, which an extractor returning a nav bar
 fails despite "succeeding". **Re-measure against a real corpus once the crawler
 has one, and treat these as the regression set.**
 
-**5 · Chunk, embed, rerank** — `src/domain/retrieval/rank.ts`.
+**5 · Chunk, embed, rerank** — `src/domain/retrieval/`. — *chunk and rank done; embed deferred.*
 Keep ~12 passages.
 → *Accepts when:* recall on the labeled set clears the bar, and the numbers are
 per-stage rather than end-to-end.
+→ *Status:* 23 tests. Chunking splits on the block boundaries extraction
+preserves, keeps paragraphs whole, overlaps so a claim on a boundary survives
+in one chunk, and splits code on lines rather than sentences. Ranking is BM25
+over the passages retrieved for this one query, behind a `Ranker` seam.
+→ **The embedding stage is deliberately absent, not forgotten.** This plan's own
+argument is that every stage has a plausible-sounding improvement that makes
+end-to-end quality worse, and that without per-stage measurement you ship all of
+them and cannot tell which did the damage. BM25 here is not lexical retrieval
+over a global index where it would miss everything phrased differently — it is a
+hundred passages from pages an upstream engine already judged relevant. Semantic
+ranking earns its model call per query on the request path or it does not, and
+**the eval harness is what says which.** Adding it first would be exactly the
+mistake the plan warns about.
+→ *Not accepted:* the criterion is recall on the labelled set, and that set does
+not exist. What is asserted instead is behaviour that must hold whatever the
+numbers say — distinctive terms beat common ones, no single page owns the whole
+context, and the shortfall from capping is filled rather than returned thin.
 
 **6 · Compose and stream** — `src/domain/compose`, `src/interface/search.ts`.
 Citation per claim. Emit blocks as they are produced.

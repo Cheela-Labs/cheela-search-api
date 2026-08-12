@@ -1,3 +1,4 @@
+export { type Chunk, type ChunkOptions, chunkText } from "./chunk";
 export {
 	type Extraction,
 	type ExtractionFailure,
@@ -12,3 +13,10 @@ export {
 	type RetrieveOptions,
 	retrievePages,
 } from "./fetch";
+export {
+	lexicalRanker,
+	type Passage,
+	type Ranker,
+	type RankOptions,
+	selectPassages,
+} from "./rank";
