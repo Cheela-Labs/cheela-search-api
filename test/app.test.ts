@@ -34,16 +34,20 @@ describe("search-api", () => {
 	});
 
 	it("answers in the event contract, not with a bare status code", async () => {
+		// No vendor credentials in the test environment, so the rotation fails —
+		// which is the point being asserted. The stream still opens with 200 and
+		// reports the failure as an event, because by then the headers are gone
+		// and there is no status left to send. `pipeline.test.ts` drives the same
+		// route with a working upstream.
 		const response = await app.request("/search?q=anything");
 
 		expect(response.status).toBe(200);
 		expect(response.headers.get("content-type")).toContain("text/event-stream");
 
 		const events = parseFrames(await response.text());
+		const types = events.map((event) => event.type);
 
-		// The surface has to be able to tell "not built yet" from "your query
-		// found nothing", and only the first of those is an error event.
-		expect(events.map((event) => event.type)).toEqual(["error", "done"]);
-		expect(events[0]).toMatchObject({ type: "error" });
+		expect(types[0]).toBe("stage");
+		expect(types).toContain("error");
 	});
 });

@@ -98,6 +98,19 @@ const schema = z
 			),
 
 		/* ---------------------------------------------------------------------
+	   Composition — step 6 of PLAN.md's build order.
+
+	   Optional, unlike the search providers: with no model the service composes
+	   by quoting the best passages verbatim. That is a worse answer and an
+	   honest one, and it beats refusing a query whose retrieval succeeded.
+	   ------------------------------------------------------------------- */
+
+		COMPOSER_API_KEY: z.string().min(1).optional(),
+
+		/** Pinned, because "the current default" is not a reproducible answer. */
+		COMPOSER_MODEL: z.string().min(1).default("openai/gpt-oss-20b:free"),
+
+		/* ---------------------------------------------------------------------
 	   Egress — step 1 of PLAN.md's build order.
 
 	   These carry defaults, unlike the credentials and connection strings the

@@ -1,6 +1,6 @@
 # apps/search-api — build plan
 
-**Status:** Phase 0 — steps 1, 2, 4 done; 3 and 5 code-done, awaiting vendor keys and an eval set · **Scope:** Phase 0 through Phase 2
+**Status:** Phase 0 — steps 1, 2, 4 done; 3, 5, 6 code-done, awaiting vendor keys and an eval set · **Scope:** Phase 0 through Phase 2
 **Consumer:** `apps/search-web`, which already speaks this service's event contract
 **Host:** Google Cloud Run
 
@@ -258,11 +258,37 @@ not exist. What is asserted instead is behaviour that must hold whatever the
 numbers say — distinctive terms beat common ones, no single page owns the whole
 context, and the shortfall from capping is filled rather than returned thin.
 
-**6 · Compose and stream** — `src/domain/compose`, `src/interface/search.ts`.
+**6 · Compose and stream** — `src/domain/compose`, `src/domain/pipeline.ts`. — *code done; not accepted.*
 Citation per claim. Emit blocks as they are produced.
 → *Accepts when:* `apps/search-web` renders a real streamed answer against this
 service with its fixture corpus disabled. That is the integration test — the
 consumer already exists, so use it.
+→ *Status:* 26 tests. `/search` now runs the pipeline for real. The ordering the
+contract depends on is asserted directly: **every source event precedes the
+first answer block**, because the surface builds its rail while the answer is
+still composing and a batched pipeline throws that away.
+→ *Two composers behind one interface.* The LLM composer goes through
+`@cheela/provider`, and is fully tested against a stub `Provider` — no key
+needed, because what is being tested is the prompt this stage builds and the
+parsing of what comes back, both deterministic. What a real model *says* is the
+eval harness's question.
+→ *The extractive composer is the fallback and is not a placeholder.* With no
+model configured it quotes the best passages verbatim, attributed, and says in
+the answer block that it is doing so. Nothing paraphrases, so nothing can
+misreport a source. A degraded answer beats an error on a query the retrieval
+stages answered perfectly well — and it is what makes the pipeline
+demonstrable without a model key at all.
+→ *Injection containment is structural, not wording.* The composer has no
+tools and cannot invoke anything; passages arrive fenced and labelled as data;
+retrieval and action never share a context. A test asserts the request carries
+no capabilities.
+→ *Invented citations are dropped, and the claim is kept.* A chip that opens
+nothing is worse than no chip — an uncited sentence reads as unsupported, a
+broken citation reads as supported.
+→ **Not accepted:** the criterion is the surface rendering against this service,
+which needs an upstream vendor key. `test/pipeline.test.ts` is as close as it
+gets without one — a stub upstream, a fixture server serving real HTML, and
+every stage between running production code.
 
 **7 · The three caches, plus the log.**
 → *Accepts when:* hit rate is on a dashboard, from the first day it can be.
