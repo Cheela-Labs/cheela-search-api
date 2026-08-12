@@ -24,7 +24,11 @@ describe("search-api", () => {
 	it("reports health", async () => {
 		const response = await app.request("/health");
 		expect(response.status).toBe(200);
-		await expect(response.json()).resolves.toMatchObject({ status: "ok" });
+		const body = (await response.json()) as Record<string, unknown>;
+		expect(body.status).toBe("ok");
+		// Reported, not asserted reachable — the suite has no database, and a
+		// health check that fails without one would restart-loop in production.
+		expect(body.database).toBe("unreachable");
 	});
 
 	it("rejects an empty query before opening a stream", async () => {

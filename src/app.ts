@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { composer } from "./domain/compose";
 import { type PipelineDeps, runPipeline } from "./domain/pipeline";
+import { databaseReachable } from "./infra/db/pool";
 import { egress } from "./infra/egress";
 import { upstream } from "./infra/upstream";
 import { config } from "./shared/config";
@@ -45,8 +46,17 @@ export function createApp(overrides: Partial<PipelineDeps> = {}) {
 		}),
 	);
 
-	app.get("/health", (context) =>
-		context.json({ status: "ok", plane: "query", phase: "pre-0" }),
+	// The database result is *reported*, never a failure condition. Cloud Run
+	// restarts a container whose health check fails, so coupling liveness to a
+	// dependency turns a brief database blip into a restart loop that takes the
+	// service down harder than the blip would have. This says what it sees and
+	// stays 200.
+	app.get("/health", async (context) =>
+		context.json({
+			status: "ok",
+			plane: "query",
+			database: (await databaseReachable()) ? "reachable" : "unreachable",
+		}),
 	);
 
 	app.get("/search", (context) => {

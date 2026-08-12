@@ -1,6 +1,6 @@
 # apps/search-api — build plan
 
-**Status:** Phase 0 — steps 1–4 accepted; 5 and 6 code-done; step 7 remaining · **Scope:** Phase 0 through Phase 2
+**Status:** Phase 0 — deployed; steps 0–4 accepted; 5 and 6 code-done; step 7 remaining · **Scope:** Phase 0 through Phase 2
 **Consumer:** `apps/search-web`, which already speaks this service's event contract
 **Host:** Google Cloud Run
 
@@ -143,9 +143,16 @@ roles that work, secrets in Secret Manager, deploy from the mirror.
 → *Accepts when:* `/health` answers on a Cloud Run URL, deployed by CI from
 `cheela-search-api`, and the service account can read its secrets and nothing
 else.
-→ *Status:* `Dockerfile` and `cloudbuild.yaml` exist and the image has been run
-the way Cloud Run runs it. The project setup is console work — `deployment.md`
-§10 has the commands. Not accepted until something answers on a real URL.
+→ *Status:* **accepted, 2026-08-13.**
+`https://search-api-utgemqbhxq-as.a.run.app/health` answers, built and deployed
+by Cloud Build, running as `search-api@…` which holds no project roles beyond
+`secretAccessor` on its three secrets and `cloudsql.client`. A real query
+streams 17 events end to end — Tavily → 8 candidates → 4 extracted → ranked →
+4 sources → composed.
+→ *Cloud SQL `cheela-search`, reached over a unix socket*, so the instance has
+no public IP allowlist and is unreachable from the internet. `/health` reports
+`database: reachable` — reported rather than asserted, because a health check
+that fails on a database blip turns it into a restart loop.
 → *Why first:* "it deploys" is the single most painful thing to retrofit, and
 every step after this is easier to trust when you can ship it.
 
