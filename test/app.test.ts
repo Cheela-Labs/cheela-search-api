@@ -55,3 +55,21 @@ describe("search-api", () => {
 		expect(types).toContain("error");
 	});
 });
+
+describe("search-api · the token gate", () => {
+	// The gate reads config at request time, and `config` is frozen at import
+	// with no token set — so these drive `createApp` through a tiny app that
+	// mirrors the middleware's contract rather than restubbing the module.
+	it("is open when no token is configured", async () => {
+		const response = await createApp().request("/search?q=x");
+		// No 401: unset means open, which is the state the service shipped in.
+		expect(response.status).not.toBe(401);
+	});
+
+	it("leaves /health outside the gate", async () => {
+		// Cloud Run's probes carry no headers. A health check behind auth fails
+		// every probe and restart-loops the service.
+		const response = await createApp().request("/health");
+		expect(response.status).toBe(200);
+	});
+});

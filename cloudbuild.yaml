@@ -118,6 +118,10 @@ steps:
       # Secrets, never environment variables in this file. The values live in
       # Secret Manager and the runtime identity can read these four and nothing
       # else; a credential pasted here would be in git and in every build log.
+      # SEARCH_API_TOKEN is deliberately absent until the caller has the
+      # matching value. Adding it here first would 401 every real request from
+      # the surface, so the order is: set it on Vercel, then add it here, then
+      # redeploy. `search-api-token` already exists in Secret Manager.
       - --set-secrets=DATABASE_URL=search-database-url:latest,TAVILY_API_KEY=search-tavily-api-key:latest,ANYSEARCH_API_KEY=search-anysearch-api-key:latest
 
 timeout: 900s

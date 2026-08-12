@@ -59,6 +59,28 @@ export function createApp(overrides: Partial<PipelineDeps> = {}) {
 		}),
 	);
 
+	/**
+	 * The token gate.
+	 *
+	 * `/health` is deliberately outside it: Cloud Run's startup and liveness
+	 * probes carry no headers, and a health check behind auth fails every probe
+	 * and restart-loops the service.
+	 *
+	 * Retrieval spends money — a query costs an upstream call plus six to ten
+	 * page fetches — so an open endpoint is somebody else's queries on our
+	 * quota. This does not pretend to be authentication; it is a bearer secret
+	 * that stops a public URL from being a public search engine.
+	 */
+	app.use("/search", async (context, next) => {
+		if (!config.SEARCH_API_TOKEN) return next();
+
+		const presented = context.req.header("authorization");
+		if (presented !== `Bearer ${config.SEARCH_API_TOKEN}`) {
+			return context.json({ error: "Unauthorized" }, 401);
+		}
+		return next();
+	});
+
 	app.get("/search", (context) => {
 		const query = (context.req.query("q") ?? "").trim().slice(0, MAX_QUERY);
 		if (!query) {

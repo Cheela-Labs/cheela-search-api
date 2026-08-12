@@ -107,6 +107,16 @@ const schema = z
 	   honest one, and it beats refusing a query whose retrieval succeeded.
 	   ------------------------------------------------------------------- */
 
+		/**
+		 * Shared secret the surface must present on `/search`.
+		 *
+		 * Optional, and that is a sequencing decision rather than a soft stance:
+		 * enabling it here before the proxy has the matching value would 401 every
+		 * real request. Set it on the caller first, then here. Unset, the endpoint
+		 * is open — which is the state it shipped in, and the reason this exists.
+		 */
+		SEARCH_API_TOKEN: z.string().min(1).optional(),
+
 		COMPOSER_API_KEY: z.string().min(1).optional(),
 
 		/** Pinned, because "the current default" is not a reproducible answer. */
