@@ -1,6 +1,6 @@
 # apps/search-api — build plan
 
-**Status:** not started · **Scope:** Phase 0 through Phase 2
+**Status:** Phase 0, step 1 of 7 · **Scope:** Phase 0 through Phase 2
 **Consumer:** `apps/search-web`, which already speaks this service's event contract
 **Host:** Google Cloud Run
 
@@ -137,16 +137,19 @@ useful on its own.
 Numbered because the order is the argument. Each step's acceptance criterion is
 the thing that has to be demonstrably true before the next one starts.
 
-**0 · Deployable skeleton.**
+**0 · Deployable skeleton.** — *repo side done; GCP side pending.*
 `Dockerfile`, Cloud Run service, a dedicated service account with the narrowest
 roles that work, secrets in Secret Manager, deploy from the mirror.
 → *Accepts when:* `/health` answers on a Cloud Run URL, deployed by CI from
 `cheela-search-api`, and the service account can read its secrets and nothing
 else.
+→ *Status:* `Dockerfile` and `cloudbuild.yaml` exist and the image has been run
+the way Cloud Run runs it. The project setup is console work — `deployment.md`
+§10 has the commands. Not accepted until something answers on a real URL.
 → *Why first:* "it deploys" is the single most painful thing to retrofit, and
 every step after this is easier to trust when you can ship it.
 
-**1 · Egress client** — `src/infra/egress`.
+**1 · Egress client** — `src/infra/egress`. — *done.*
 One client, one policy, every outbound request in both planes. Resolve DNS
 first and reject RFC1918, loopback, link-local and `169.254.169.254`. Pin the
 resolved IP so nothing can rebind between check and connect. Refuse cross-host
@@ -155,6 +158,11 @@ redirects. Cap response size and wall-clock time.
 private ranges, loopback, link-local, a cross-host redirect chain, an oversized
 body, a slow-loris body, and a hostname that resolves differently on the second
 lookup.
+→ *Status:* accepted. 82 tests in `test/egress/`, one per refusal above plus the
+IPv6 spellings of loopback and the metadata address, the port and scheme rules,
+and the ordinary case. Two controls were added beyond the criterion: a
+scheme allowlist, because `file://` is a URL too, and an 80/443 port allowlist,
+because a *public* host serving on 6379 is still Redis.
 → *Why second:* every remaining step makes outbound calls. Build fetch-and-
 extract first and the policy gets bolted on afterwards with one path missed.
 Two implementations means one of them is wrong.

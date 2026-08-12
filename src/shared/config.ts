@@ -37,6 +37,35 @@ const schema = z.object({
 				.map((origin) => origin.trim())
 				.filter(Boolean),
 		),
+
+	/* ---------------------------------------------------------------------
+	   Egress — step 1 of PLAN.md's build order.
+
+	   These carry defaults, unlike the credentials and connection strings the
+	   later steps add. The rule those follow — required, so the service cannot
+	   boot without them — exists because a missing DATABASE_URL is a wiring
+	   mistake that must fail loudly at start rather than at first use. A
+	   timeout is not wiring: there is a correct-by-default value, an unset
+	   variable means "the default is fine", and requiring one would make every
+	   deployment restate four numbers nobody has an opinion about.
+	   ------------------------------------------------------------------- */
+
+	/** Whole-request deadline, redirects included. */
+	EGRESS_TIMEOUT_MS: z.coerce.number().int().positive().default(10_000),
+
+	/** A page above this is dropped, not truncated — see the client's comment. */
+	EGRESS_MAX_BYTES: z.coerce.number().int().positive().default(2_000_000),
+
+	EGRESS_MAX_REDIRECTS: z.coerce.number().int().nonnegative().default(3),
+
+	/**
+	 * Identified, and pointing somewhere an operator can read about us. The
+	 * architecture's rule that we crawl and invoke under a name that can be
+	 * blocked starts here.
+	 */
+	EGRESS_USER_AGENT: z
+		.string()
+		.default("CheelaSearchBot/0.1 (+https://search.cheelalabs.com/bot)"),
 });
 
 export type Config = z.infer<typeof schema>;
