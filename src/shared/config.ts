@@ -78,6 +78,8 @@ const schema = z
 
 		TAVILY_API_KEY: z.string().min(1).optional(),
 
+		ANYSEARCH_API_KEY: z.string().min(1).optional(),
+
 		GOOGLE_CSE_API_KEY: z.string().min(1).optional(),
 		/** The Programmable Search Engine id (`cx`), configured to search the whole web. */
 		GOOGLE_CSE_ENGINE_ID: z.string().min(1).optional(),
@@ -89,7 +91,7 @@ const schema = z
 		 */
 		SEARCH_PROVIDER_ORDER: z
 			.string()
-			.default("tavily,google-cse")
+			.default("tavily,anysearch")
 			.transform((value) =>
 				value
 					.split(",")
@@ -151,6 +153,7 @@ const schema = z
 	.superRefine((value, context) => {
 		const complete =
 			Boolean(value.TAVILY_API_KEY) ||
+			Boolean(value.ANYSEARCH_API_KEY) ||
 			Boolean(value.GOOGLE_CSE_API_KEY && value.GOOGLE_CSE_ENGINE_ID);
 
 		if (!complete) {
@@ -158,8 +161,8 @@ const schema = z
 				code: "custom",
 				path: ["TAVILY_API_KEY"],
 				message:
-					"no upstream search provider is configured — set TAVILY_API_KEY, " +
-					"or both GOOGLE_CSE_API_KEY and GOOGLE_CSE_ENGINE_ID",
+					"no upstream search provider is configured — set TAVILY_API_KEY " +
+					"or ANYSEARCH_API_KEY",
 			});
 		}
 	});

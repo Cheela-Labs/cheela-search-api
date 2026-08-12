@@ -1,10 +1,12 @@
 import { config } from "../../shared/config";
 import { egress } from "../egress";
+import { createAnySearchProvider } from "./anysearch";
 import { createGoogleCseProvider } from "./google-cse";
 import { createRotation } from "./rotation";
 import { createTavilyProvider } from "./tavily";
 import type { SearchProvider } from "./types";
 
+export { createAnySearchProvider } from "./anysearch";
 export { createGoogleCseProvider } from "./google-cse";
 export {
 	createRotation,
@@ -36,6 +38,10 @@ function build(): SearchProvider[] {
 			() => createTavilyProvider(config.TAVILY_API_KEY as string, egress),
 		],
 		[
+			"anysearch",
+			() => createAnySearchProvider(config.ANYSEARCH_API_KEY as string, egress),
+		],
+		[
 			"google-cse",
 			() =>
 				createGoogleCseProvider(
@@ -48,6 +54,7 @@ function build(): SearchProvider[] {
 
 	const configured: Record<string, boolean> = {
 		tavily: Boolean(config.TAVILY_API_KEY),
+		anysearch: Boolean(config.ANYSEARCH_API_KEY),
 		"google-cse": Boolean(
 			config.GOOGLE_CSE_API_KEY && config.GOOGLE_CSE_ENGINE_ID,
 		),

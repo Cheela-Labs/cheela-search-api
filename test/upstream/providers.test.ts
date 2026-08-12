@@ -2,6 +2,7 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import { createEgressClient } from "../../src/infra/egress/client";
+import { createAnySearchProvider } from "../../src/infra/upstream/anysearch";
 import { createGoogleCseProvider } from "../../src/infra/upstream/google-cse";
 import { createRotation } from "../../src/infra/upstream/rotation";
 import { createTavilyProvider } from "../../src/infra/upstream/tavily";
@@ -422,5 +423,142 @@ describe("rotation", () => {
 				provider: name,
 			});
 		}
+	});
+});
+
+/* -------------------------------------------------------------------------
+   AnySearch. Every shape below was read off a real call before the provider
+   was written, so these fixtures encode observed behaviour rather than an
+   assumption the implementation also makes.
+   ------------------------------------------------------------------------- */
+
+describe("anysearch provider", () => {
+	const envelope = (results: unknown) => ({
+		code: 0,
+		message: "Success.",
+		request_id: "abc",
+		data: { results },
+	});
+
+	it("reads results from data.results, not the top level", async () => {
+		const port = await fixture((_request, response) => {
+			response.writeHead(200, { "content-type": "application/json" });
+			response.end(
+				JSON.stringify(
+					envelope([
+						{
+							title: "One",
+							url: "https://a.test/1",
+							snippet: "a snippet",
+							content: "whole page text",
+						},
+					]),
+				),
+			);
+		});
+
+		const provider = createAnySearchProvider(
+			"as_sk_key",
+			loopbackClient(),
+			endpointFor(port),
+		);
+		const candidates = await provider.search("q", { limit: 3 });
+
+		expect(candidates).toEqual([
+			{ url: "https://a.test/1", title: "One", rank: 1, provider: "anysearch" },
+		]);
+		// The vendor returns both a snippet and the page text. Carrying either
+		// would mean citing something we never fetched.
+		const serialised = JSON.stringify(candidates);
+		expect(serialised).not.toContain("snippet");
+		expect(serialised).not.toContain("whole page text");
+	});
+
+	it("sends the bearer token and clamps max_results to the documented range", async () => {
+		const seen: { auth?: string; body?: Record<string, unknown> } = {};
+		const port = await fixture((request, response) => {
+			seen.auth = request.headers.authorization;
+			let raw = "";
+			request.on("data", (chunk) => {
+				raw += chunk;
+			});
+			request.on("end", () => {
+				seen.body = JSON.parse(raw) as Record<string, unknown>;
+				response.writeHead(200, { "content-type": "application/json" });
+				response.end(JSON.stringify(envelope([])));
+			});
+		});
+
+		const provider = createAnySearchProvider(
+			"as_sk_key",
+			loopbackClient(),
+			endpointFor(port),
+		);
+		await provider.search("hello", { limit: 99 });
+
+		expect(seen.auth).toBe("Bearer as_sk_key");
+		expect(seen.body?.query).toBe("hello");
+		// Documented as 1–20 and rejected outside it, so the clamp has to happen
+		// before the request goes out.
+		expect(seen.body?.max_results).toBe(20);
+	});
+
+	it("treats an error code as a failure even if the status were 200", async () => {
+		// Belt and braces: this API does send real statuses, but an envelope that
+		// carries a code usually means for it to be read.
+		const port = await fixture((_request, response) => {
+			response.writeHead(200, { "content-type": "application/json" });
+			response.end(JSON.stringify({ code: -1, message: "Quota exceeded." }));
+		});
+
+		const provider = createAnySearchProvider(
+			"k",
+			loopbackClient(),
+			endpointFor(port),
+		);
+		await expect(provider.search("q")).rejects.toThrow(/Quota exceeded/);
+	});
+
+	it("surfaces the vendor's message rather than the bare status", async () => {
+		const port = await fixture((_request, response) => {
+			response.writeHead(401, { "content-type": "application/json" });
+			response.end(JSON.stringify({ code: -1, message: "Invalid API key." }));
+		});
+
+		const provider = createAnySearchProvider(
+			"wrong",
+			loopbackClient(),
+			endpointFor(port),
+		);
+		// "Invalid API key." says more in a trace than "HTTP 401" does.
+		await expect(provider.search("q")).rejects.toThrow(/Invalid API key/);
+	});
+
+	it("treats a missing data.results as a changed contract, not an empty result", async () => {
+		const port = await fixture((_request, response) => {
+			response.writeHead(200, { "content-type": "application/json" });
+			response.end(JSON.stringify({ code: 0, message: "Success.", data: {} }));
+		});
+
+		const provider = createAnySearchProvider(
+			"k",
+			loopbackClient(),
+			endpointFor(port),
+		);
+		await expect(provider.search("q")).rejects.toBeInstanceOf(UpstreamError);
+	});
+
+	it("returns an empty list when the vendor genuinely found nothing", async () => {
+		const port = await fixture((_request, response) => {
+			response.writeHead(200, { "content-type": "application/json" });
+			response.end(JSON.stringify(envelope([])));
+		});
+
+		const provider = createAnySearchProvider(
+			"k",
+			loopbackClient(),
+			endpointFor(port),
+		);
+		await expect(provider.search("q")).resolves.toEqual([]);
 	});
 });

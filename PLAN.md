@@ -1,6 +1,6 @@
 # apps/search-api — build plan
 
-**Status:** Phase 0 — steps 1, 2, 4 done; 3, 5, 6 code-done, awaiting vendor keys and an eval set · **Scope:** Phase 0 through Phase 2
+**Status:** Phase 0 — steps 1–4 accepted; 5 and 6 code-done; step 7 remaining · **Scope:** Phase 0 through Phase 2
 **Consumer:** `apps/search-web`, which already speaks this service's event contract
 **Host:** Google Cloud Run
 
@@ -187,36 +187,36 @@ somebody's laptop.
 Normalize both to one candidate shape.
 → *Accepts when:* the same test suite passes against either vendor with only a
 config change, and a forced failure of one falls through to the other.
-→ *Vendors:* **Tavily**, and a second still to be chosen. Two were ruled out for
-reasons worth recording, because both look obvious from a distance.
-**Brave** — its free tier is behind a payment card that would not accept ours,
-which is a mundane blocker and a total one.
+→ *Vendors:* **Tavily** and **AnySearch**. Two others were ruled out, and both
+look obvious from a distance, which is why they are recorded.
+**Brave** — its free tier is behind a payment card that would not accept ours: a
+mundane blocker and a total one.
 **Google Programmable Search** — chosen next because it bills through a GCP
-project that already had a working card, then dropped on 2026-08-13: it no
-longer offers whole-web search. The product now covers only "a specified
-collection of sites or pages", so a Programmable Search Engine returns almost
-nothing for a general query and looks exactly like a broken one. The API key
-created for it has been deleted rather than left lying around.
-→ *The rule's purpose is already served, even though its letter is not.* "Two
-vendors from day one" exists because the second never gets added later, under
-pressure — the interface does not get built. That interface **is** built and
-proven: the rotation's failover, no-failover-on-empty, abort and
-total-failure paths are all tested against stubs, so adding a vendor is now a
-file and a config entry rather than a refactor. What remains unmitigated is
-concentration risk on Tavily, which bites at production volume and not before.
+project that already had a working card, then dropped on 2026-08-13 when it
+turned out no longer to offer whole-web search. It now covers only "a specified
+collection of sites", so a general query returns almost nothing and looks like a
+broken engine rather than a scoping limit. The API key created for it was
+deleted; the provider code is kept, marked not-for-production, because it is a
+working second implementation of the interface and is useful for site-restricted
+search.
 → *SearXNG was considered and rejected.* It scrapes engines from a datacenter
 IP, which Cloud Run's ranges get blocked from fastest; being an aggregator like
 Tavily it is not really a second vendor; and running a scraper against sites
 whose terms forbid it contradicts Decision 03's own argument about consent.
-→ *Status:* 19 tests. The rotation half is fully proven — failover on error, no
-failover on an empty result set, abort stops the sweep, total failure reported
-rather than thrown, and identical behaviour whichever provider answers.
-→ **Not accepted, and the gap is specific:** both providers' request and
-response shapes were written from documentation, and their tests assert the
-shape the implementation expects. A wrong expectation passes here and fails on
-the first real call. **Acceptance needs one live response from each vendor
-reconciled against these fixtures** — until then the failure paths are proven
-and the happy path is a guess.
+→ *Status:* **accepted, 25 tests.** The rotation is proven — failover on error,
+no failover on an empty result set, abort stops the sweep, total failure
+reported rather than thrown, identical behaviour whichever provider answers.
+→ *Verified against the live APIs, not against documentation.* Tavily's real
+response reconciles with what was implemented. AnySearch's shape was read off a
+real call **before** its provider was written — deliberately, because the last
+shape taken on trust was the egress client's `accept-encoding`, whose tests
+passed against the same assumption they encoded. Two details that would have
+been wrong if guessed: results nest under `data.results`, and both a `snippet`
+and full page `content` come back, neither of which a `Candidate` has anywhere
+to put.
+→ *Failover proven end to end with real vendors*, by breaking the Tavily key and
+watching the rotation fall through to AnySearch and answer. That is the
+criterion, met with the real thing rather than a stub.
 → *Why both now:* a single search vendor is a single point of both cost and
 termination, and the second one never gets added later, under pressure, when
 the first one changes its pricing. Both have free tiers, so this costs the
