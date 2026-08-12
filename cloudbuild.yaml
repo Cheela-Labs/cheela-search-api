@@ -1,0 +1,95 @@
+# Cloud Build → Artifact Registry → Cloud Run.
+#
+# Attach a trigger to the `cheela-search-api` mirror, not to this monorepo:
+# the Dockerfile's context is this directory, and at the mirror root that is
+# the whole repo. Pointing a trigger at the monorepo hands Docker the wrong
+# context and the build fails on files it cannot see.
+#
+#   gcloud builds triggers create github \
+#     --name=search-api-main \
+#     --repo-owner=Cheela-Labs --repo-name=cheela-search-api \
+#     --branch-pattern='^main$' \
+#     --build-config=cloudbuild.yaml
+#
+# Everything below is overridable with --substitutions so this file carries no
+# project-specific values. `_SERVICE_ACCOUNT` is the runtime identity — see
+# Decision 02 in PLAN.md for why it must be a dedicated one rather than the
+# default compute account.
+
+substitutions:
+  _REGION: asia-south1
+  _SERVICE: search-api
+  _REPO: cheela
+  _SERVICE_ACCOUNT: search-api@${PROJECT_ID}.iam.gserviceaccount.com
+  _MIN_INSTANCES: "0"
+  _MAX_INSTANCES: "4"
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+images:
+  - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}:${SHORT_SHA}
+
+steps:
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - --tag=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}:${SHORT_SHA}
+      - --cache-from=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}:latest
+      - .
+
+  - id: tag-latest
+    name: gcr.io/cloud-builders/docker
+    args:
+      - tag
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}:${SHORT_SHA}
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}:latest
+
+  - id: push-latest
+    name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}:latest
+
+  - id: deploy
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - ${_SERVICE}
+      - --image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}:${SHORT_SHA}
+      - --region=${_REGION}
+      - --platform=managed
+
+      # Public: the surface calls this from the browser, cross-origin. The
+      # allowlist that matters is ALLOWED_ORIGINS in the service, not ingress.
+      - --allow-unauthenticated
+      - --ingress=all
+
+      # Decision 02. Not the default compute service account — an SSRF that
+      # reaches the metadata server steals whatever this identity can do, so it
+      # should be able to do almost nothing.
+      - --service-account=${_SERVICE_ACCOUNT}
+
+      # Scale to zero while the budget is the constraint. Max is a cost ceiling,
+      # not a capacity plan; raise it deliberately.
+      - --min-instances=${_MIN_INSTANCES}
+      - --max-instances=${_MAX_INSTANCES}
+
+      # Answers stream for a few seconds, so a request is long-lived by design.
+      # 300s leaves room for a slow upstream without letting a wedged stream
+      # hold an instance indefinitely.
+      - --timeout=300
+      - --concurrency=40
+
+      # gen2 for a better network stack — this service's whole job is outbound
+      # fetching, and gen1's is noticeably worse at it.
+      - --execution-environment=gen2
+
+      - --cpu=1
+      - --memory=512Mi
+      - --set-env-vars=NODE_ENV=production
+
+timeout: 900s

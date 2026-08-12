@@ -1,0 +1,23 @@
+# Docker reads the .dockerignore at the context root, and the context is this
+# directory — the monorepo root's copy does not apply. In the cheela-search-api
+# mirror this file sits at the repo root, where it is the only one.
+#
+# node_modules in particular MUST be excluded: the host's tree contains
+# platform-native binaries built for the host architecture, and copying them
+# over an Alpine install produces binaries that load on your machine and fail
+# in the container.
+node_modules
+
+dist
+.turbo
+coverage
+*.tsbuildinfo
+
+.git
+
+.env
+.env.*
+!.env*.example
+
+*.log
+.DS_Store
