@@ -187,12 +187,23 @@ somebody's laptop.
 Normalize both to one candidate shape.
 → *Accepts when:* the same test suite passes against either vendor with only a
 config change, and a forced failure of one falls through to the other.
-→ *Vendors:* **Tavily** and **Google Programmable Search**. Brave was the first
-choice and was dropped for a mundane reason worth recording — its free tier is
-behind a card that would not accept ours. Google CSE bills through a GCP
-project that already has a working payment method, which is the constraint that
-actually decided it. It fails independently of Tavily: different company,
-different billing, different termination risk.
+→ *Vendors:* **Tavily**, and a second still to be chosen. Two were ruled out for
+reasons worth recording, because both look obvious from a distance.
+**Brave** — its free tier is behind a payment card that would not accept ours,
+which is a mundane blocker and a total one.
+**Google Programmable Search** — chosen next because it bills through a GCP
+project that already had a working card, then dropped on 2026-08-13: it no
+longer offers whole-web search. The product now covers only "a specified
+collection of sites or pages", so a Programmable Search Engine returns almost
+nothing for a general query and looks exactly like a broken one. The API key
+created for it has been deleted rather than left lying around.
+→ *The rule's purpose is already served, even though its letter is not.* "Two
+vendors from day one" exists because the second never gets added later, under
+pressure — the interface does not get built. That interface **is** built and
+proven: the rotation's failover, no-failover-on-empty, abort and
+total-failure paths are all tested against stubs, so adding a vendor is now a
+file and a config entry rather than a refactor. What remains unmitigated is
+concentration risk on Tavily, which bites at production volume and not before.
 → *SearXNG was considered and rejected.* It scrapes engines from a datacenter
 IP, which Cloud Run's ranges get blocked from fastest; being an aggregator like
 Tavily it is not really a second vendor; and running a scraper against sites

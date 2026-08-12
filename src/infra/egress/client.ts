@@ -158,7 +158,8 @@ async function decode(
 	const options = { maxOutputLength: maxBytes };
 
 	try {
-		if (name === "gzip" || name === "x-gzip") return await gunzip(body, options);
+		if (name === "gzip" || name === "x-gzip")
+			return await gunzip(body, options);
 		if (name === "br") return await brotliDecompress(body, options);
 		if (name === "deflate") {
 			// Servers disagree about whether `deflate` means zlib-wrapped or raw,

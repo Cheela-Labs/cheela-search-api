@@ -11,9 +11,19 @@ import {
 /**
  * Google Programmable Search, via the Custom Search JSON API.
  *
- * Chosen as the second vendor for a practical reason rather than a technical
- * one: it bills through a GCP project that already has a working payment
- * method, which is the constraint that ruled out the obvious alternatives.
+ * ⚠ **Not in the production rotation, and cannot be.** This was chosen as the
+ * second vendor because it bills through a GCP project with a working payment
+ * method, then ruled out on 2026-08-13: Programmable Search no longer offers
+ * whole-web search. It covers "a specified collection of sites or pages", so
+ * for a general query it returns almost nothing — which looks exactly like a
+ * broken engine rather than a scoping limit, and is why this is written down
+ * here rather than discovered again.
+ *
+ * Kept rather than deleted because the code is correct and tested: it is a
+ * working second implementation of `SearchProvider`, which is what proves the
+ * interface generalises beyond one vendor. It also becomes useful the moment
+ * anything wants search restricted to a curated set of sites, which is a real
+ * use even though it is not this one.
  *
  * ⚠ Same caveat as the Tavily provider — shapes written from documentation and
  * tested against a fixture asserting the same shapes. Reconcile against a real
