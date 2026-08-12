@@ -39,6 +39,33 @@ const schema = z.object({
 		),
 
 	/* ---------------------------------------------------------------------
+	   Storage — step 2 of PLAN.md's build order.
+
+	   DATABASE_URL is required, with no default, per the rule this file opens
+	   with: a missing connection string is a wiring mistake, and the service
+	   should refuse to start rather than discover it at the first query. Tests
+	   supply one through vitest.config.ts because `config` is parsed and frozen
+	   at import, before any test body runs.
+	   ------------------------------------------------------------------- */
+
+	DATABASE_URL: z.string().min(1, "DATABASE_URL is required"),
+
+	/**
+	 * Multiply by `--max-instances` before raising this: that product is what
+	 * the database actually sees, and a scale-to-zero service asking for four
+	 * times what its Postgres allows fails on its first spike rather than in
+	 * a load test.
+	 */
+	DATABASE_POOL_MAX: z.coerce.number().int().positive().default(5),
+
+	/** Bounded below the request deadline, so a query cannot outlive its caller. */
+	DATABASE_STATEMENT_TIMEOUT_MS: z.coerce
+		.number()
+		.int()
+		.positive()
+		.default(8_000),
+
+	/* ---------------------------------------------------------------------
 	   Egress — step 1 of PLAN.md's build order.
 
 	   These carry defaults, unlike the credentials and connection strings the
@@ -70,4 +97,27 @@ const schema = z.object({
 
 export type Config = z.infer<typeof schema>;
 
-export const config: Config = Object.freeze(schema.parse(process.env));
+/**
+ * Parses, or fails with something a person can act on.
+ *
+ * `schema.parse` throws a ZodError whose message is a JSON dump of issue
+ * objects, printed with a module-load stack trace behind it. The most common
+ * failure this service will ever have is a missing environment variable on a
+ * fresh deploy, and "ZodError: [ { code: 'invalid_type', ... } ]" is a worse
+ * answer to that than one line naming the variable.
+ */
+function parseConfig(): Config {
+	const result = schema.safeParse(process.env);
+	if (result.success) return result.data;
+
+	const problems = result.error.issues
+		.map((issue) => `  ${issue.path.join(".") || "(root)"}: ${issue.message}`)
+		.join("\n");
+
+	throw new Error(
+		`Invalid environment for @cheela/search-api:\n${problems}\n\n` +
+			"See .env.example for what each one is and where its value comes from.",
+	);
+}
+
+export const config: Config = Object.freeze(parseConfig());

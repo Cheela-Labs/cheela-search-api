@@ -1,7 +1,9 @@
 import { defineConfig } from "tsup";
 
 export default defineConfig({
-	entry: ["src/index.ts"],
+	// Two entrypoints: the server, and the migration runner that must be a
+	// separate process from it. See src/migrate.ts.
+	entry: ["src/index.ts", "src/migrate.ts"],
 	format: ["esm"],
 	splitting: false,
 	sourcemap: true,

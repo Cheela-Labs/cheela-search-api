@@ -95,6 +95,10 @@ COPY --from=prod-deps /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 # `"type": "module"` lives here — without it Node reads dist/index.js as CJS.
 COPY package.json ./
+# Read at runtime by `node dist/migrate.js`, not inlined by the bundler, so
+# they have to be in the image. `migrationsDirectory()` resolves them one level
+# up from the entrypoint, which is the same relative path in dist/ and src/.
+COPY --from=build /app/migrations ./migrations
 
 # Don't run as root.
 USER node

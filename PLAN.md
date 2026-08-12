@@ -1,6 +1,6 @@
 # apps/search-api — build plan
 
-**Status:** Phase 0, step 1 of 7 · **Scope:** Phase 0 through Phase 2
+**Status:** Phase 0, step 2 of 7 · **Scope:** Phase 0 through Phase 2
 **Consumer:** `apps/search-web`, which already speaks this service's event contract
 **Host:** Google Cloud Run
 
@@ -167,11 +167,20 @@ because a *public* host serving on 6379 is still Redis.
 extract first and the policy gets bolted on afterwards with one path missed.
 Two implementations means one of them is wrong.
 
-**2 · Storage** — `src/infra/db`, migrations.
+**2 · Storage** — `src/infra/db`, migrations. — *done.*
 Postgres 16 with pgvector, `web` schema. `query_log` lands here, in this step,
 permanent and unlinked from any user identity.
 → *Accepts when:* migrations run clean forward on an empty database and the
 schema matches the tables below.
+→ *Status:* accepted, against a real Postgres 16 with pgvector 0.8.6 —
+`docker compose up -d postgres` now serves one, and `TEST_DATABASE_URL` points
+the suite at it. Ten tests, including four concurrent runners racing a cold
+start. Migrations are forward-only and run as their own process, not on boot:
+migrating during a cold start turns a schema change into a latency change, and
+a bad migration into an outage rather than a failed deploy step.
+→ *Gap, named rather than hidden:* CI has no Postgres service container, so
+these ten skip there. The acceptance evidence is a local run. Wiring a service
+container into `ci.yml` is the fix and it is not done.
 
 **3 · Upstream provider interface** — `src/infra/upstream`.
 **Two vendors, wired, switchable by config.** Not "designed for two" — two.
