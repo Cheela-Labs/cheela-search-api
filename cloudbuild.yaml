@@ -112,16 +112,16 @@ steps:
 
       - --cpu=1
       - --memory=512Mi
-      - --set-env-vars=NODE_ENV=production
+      - --set-env-vars=NODE_ENV=production,SEARCH_API_TOKEN_MODE=observe
       - --add-cloudsql-instances=${PROJECT_ID}:${_REGION}:${_SQL_INSTANCE_NAME}
 
       # Secrets, never environment variables in this file. The values live in
       # Secret Manager and the runtime identity can read these four and nothing
       # else; a credential pasted here would be in git and in every build log.
-      # SEARCH_API_TOKEN is deliberately absent until the caller has the
-      # matching value. Adding it here first would 401 every real request from
-      # the surface, so the order is: set it on Vercel, then add it here, then
-      # redeploy. `search-api-token` already exists in Secret Manager.
-      - --set-secrets=DATABASE_URL=search-database-url:latest,TAVILY_API_KEY=search-tavily-api-key:latest,ANYSEARCH_API_KEY=search-anysearch-api-key:latest,COMPOSER_API_KEY=search-composer-api-key:latest
+      # SEARCH_API_TOKEN enabled 2026-08-13, after the surface was confirmed
+      # to be sending it. That order is the whole of the sequencing: enabling it
+      # first would 401 every real request. `/health` stays outside the gate so
+      # Cloud Run's probes, which carry no headers, keep passing.
+      - --set-secrets=DATABASE_URL=search-database-url:latest,TAVILY_API_KEY=search-tavily-api-key:latest,ANYSEARCH_API_KEY=search-anysearch-api-key:latest,COMPOSER_API_KEY=search-composer-api-key:latest,SEARCH_API_TOKEN=search-api-token:latest,SEARCH_API_TOKEN=search-api-token:latest
 
 timeout: 900s

@@ -7,6 +7,7 @@ import { egress } from "./infra/egress";
 import { upstream } from "./infra/upstream";
 import { config } from "./shared/config";
 import { frame, type SearchEvent } from "./shared/events";
+import { logger } from "./shared/logger";
 
 /** Longer than any sensible query, short enough to bound what reaches a model. */
 const MAX_QUERY = 400;
@@ -75,10 +76,23 @@ export function createApp(overrides: Partial<PipelineDeps> = {}) {
 		if (!config.SEARCH_API_TOKEN) return next();
 
 		const presented = context.req.header("authorization");
-		if (presented !== `Bearer ${config.SEARCH_API_TOKEN}`) {
-			return context.json({ error: "Unauthorized" }, 401);
-		}
-		return next();
+		const ok = presented === `Bearer ${config.SEARCH_API_TOKEN}`;
+		if (ok) return next();
+
+		// Logged either way. In `enforce` this is the abuse signal worth counting;
+		// in `observe` it is the whole point — it says whether the caller is ready
+		// before refusing anything.
+		logger.warn(
+			{
+				mode: config.SEARCH_API_TOKEN_MODE,
+				presented: presented ? "mismatched" : "absent",
+				agent: context.req.header("user-agent")?.slice(0, 60),
+			},
+			"search token rejected",
+		);
+
+		if (config.SEARCH_API_TOKEN_MODE === "observe") return next();
+		return context.json({ error: "Unauthorized" }, 401);
 	});
 
 	app.get("/search", (context) => {

@@ -117,6 +117,18 @@ const schema = z
 		 */
 		SEARCH_API_TOKEN: z.string().min(1).optional(),
 
+		/**
+		 * What the gate does with a token that does not match.
+		 *
+		 * `observe` admits the request and logs the verdict; `enforce` refuses it.
+		 * The two states exist because turning auth on is the one change that
+		 * cannot be verified before it is made — the caller either holds the
+		 * secret or does not, and there is no way to ask from outside. Deploying
+		 * `observe` first turns that into a log line instead of an outage, which
+		 * is how this should have been done the first time.
+		 */
+		SEARCH_API_TOKEN_MODE: z.enum(["observe", "enforce"]).default("enforce"),
+
 		COMPOSER_API_KEY: z.string().min(1).optional(),
 
 		/** Pinned, because "the current default" is not a reproducible answer. */
