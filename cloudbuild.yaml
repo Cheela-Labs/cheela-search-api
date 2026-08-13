@@ -122,6 +122,6 @@ steps:
       # matching value. Adding it here first would 401 every real request from
       # the surface, so the order is: set it on Vercel, then add it here, then
       # redeploy. `search-api-token` already exists in Secret Manager.
-      - --set-secrets=DATABASE_URL=search-database-url:latest,TAVILY_API_KEY=search-tavily-api-key:latest,ANYSEARCH_API_KEY=search-anysearch-api-key:latest
+      - --set-secrets=DATABASE_URL=search-database-url:latest,TAVILY_API_KEY=search-tavily-api-key:latest,ANYSEARCH_API_KEY=search-anysearch-api-key:latest,COMPOSER_API_KEY=search-composer-api-key:latest
 
 timeout: 900s

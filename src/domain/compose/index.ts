@@ -1,5 +1,4 @@
-import { OpenRouterProvider } from "@cheela/provider";
-import { config } from "../../shared/config";
+import { textModel } from "../../infra/model";
 import { extractiveComposer } from "./extractive";
 import { createLlmComposer } from "./llm";
 import type { Composer } from "./types";
@@ -28,11 +27,6 @@ export {
  * profiles and each will want a different model pinned — which is a decision to
  * keep changeable rather than to embed in an import.
  */
-export const composer: Composer = config.COMPOSER_API_KEY
-	? createLlmComposer({
-			provider: new OpenRouterProvider({
-				apiKey: config.COMPOSER_API_KEY,
-				model: config.COMPOSER_MODEL,
-			}),
-		})
+export const composer: Composer = textModel
+	? createLlmComposer({ model: textModel })
 	: extractiveComposer;

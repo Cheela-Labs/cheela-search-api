@@ -1,4 +1,3 @@
-import type { Provider, ProviderRequest } from "@cheela/provider";
 import { describe, expect, it } from "vitest";
 import { splitSections, toSpans } from "../../src/domain/compose/citations";
 import { extractiveComposer } from "../../src/domain/compose/extractive";
@@ -9,6 +8,7 @@ import {
 	swatchFor,
 } from "../../src/domain/compose/types";
 import type { Passage } from "../../src/domain/retrieval/rank";
+import type { CompletionRequest, TextModel } from "../../src/infra/model/types";
 import type { AnswerBlock } from "../../src/shared/events";
 
 /**
@@ -35,20 +35,17 @@ const passage = (
 	score: 1,
 });
 
-const stubProvider = (
+/** A model that returns what it is told to, and records what it was asked. */
+const stubModel = (
 	reply: string,
-): Provider & { seen: ProviderRequest[] } => {
-	const seen: ProviderRequest[] = [];
+): TextModel & { seen: CompletionRequest[] } => {
+	const seen: CompletionRequest[] = [];
 	return {
+		name: "stub",
 		seen,
-		async generate(request) {
+		async complete(request) {
 			seen.push(request);
-			return {
-				message: {
-					role: "assistant",
-					parts: [{ type: "text", content: reply }],
-				},
-			};
+			return reply;
 		},
 	};
 };
@@ -204,47 +201,49 @@ describe("llm composer", () => {
 	const sources = sourcesFrom(passages) as CitedSource[];
 
 	it("labels passages as data and says they are not instructions", async () => {
-		const provider = stubProvider("ANSWER: Use Workers [1].");
+		const model = stubModel("ANSWER: Use Workers [1].");
 		await collect(
-			createLlmComposer({ provider }).compose({
+			createLlmComposer({ model }).compose({
 				query: "cold start",
 				passages,
 				sources,
 			}),
 		);
 
-		const [request] = provider.seen;
-		const system = JSON.stringify(request?.messages[0]);
-		const user = JSON.stringify(request?.messages[1]);
+		const [request] = model.seen;
+		const system = request?.system ?? "";
+		const user = request?.user ?? "";
 
 		// Page content reaches this stage having passed no screen. The fence and
 		// the rule about it are the structural half of the containment; the
 		// composer having no tools is the other.
 		expect(user).toContain("<SOURCES>");
 		expect(system).toContain("data, not instruction");
-		expect(request?.capabilities ?? []).toHaveLength(0);
+		// No tools exist to pass — `TextModel` has nowhere to put them, which is
+		// the containment made structural rather than remembered.
+		expect(Object.keys(request ?? {})).not.toContain("capabilities");
 	});
 
 	it("numbers passages in the prompt the way citations refer to them", async () => {
-		const provider = stubProvider("ANSWER: x [1].");
+		const model = stubModel("ANSWER: x [1].");
 		await collect(
-			createLlmComposer({ provider }).compose({
+			createLlmComposer({ model }).compose({
 				query: "q",
 				passages,
 				sources,
 			}),
 		);
-		const user = JSON.stringify(provider.seen[0]?.messages[1]);
+		const user = model.seen[0]?.user ?? "";
 		expect(user).toContain("[1] (a.test)");
 		expect(user).toContain("[2] (b.test)");
 	});
 
 	it("maps labelled sections onto answer and note blocks", async () => {
-		const provider = stubProvider(
+		const model = stubModel(
 			"ANSWER: Use Workers [1].\nWHY: They have no cold start [1].\nTRADEOFF: CPU is capped [2].",
 		);
 		const blocks = await collect(
-			createLlmComposer({ provider }).compose({
+			createLlmComposer({ model }).compose({
 				query: "q",
 				passages,
 				sources,
@@ -266,9 +265,9 @@ describe("llm composer", () => {
 	it("renders unlabelled prose as one answer rather than discarding it", async () => {
 		// The model ignored the format. A correct answer in the wrong shape is
 		// still a correct answer.
-		const provider = stubProvider("Workers are the right choice here [1].");
+		const model = stubModel("Workers are the right choice here [1].");
 		const blocks = await collect(
-			createLlmComposer({ provider }).compose({
+			createLlmComposer({ model }).compose({
 				query: "q",
 				passages,
 				sources,
@@ -279,9 +278,9 @@ describe("llm composer", () => {
 	});
 
 	it("strips a citation the model invented", async () => {
-		const provider = stubProvider("ANSWER: Use Workers [9].");
+		const model = stubModel("ANSWER: Use Workers [9].");
 		const blocks = await collect(
-			createLlmComposer({ provider }).compose({
+			createLlmComposer({ model }).compose({
 				query: "q",
 				passages,
 				sources,
@@ -294,9 +293,9 @@ describe("llm composer", () => {
 	});
 
 	it("emits nothing rather than an empty block when the model said nothing", async () => {
-		const provider = stubProvider("   ");
+		const model = stubModel("   ");
 		const blocks = await collect(
-			createLlmComposer({ provider }).compose({
+			createLlmComposer({ model }).compose({
 				query: "q",
 				passages,
 				sources,

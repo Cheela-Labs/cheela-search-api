@@ -120,7 +120,7 @@ const schema = z
 		COMPOSER_API_KEY: z.string().min(1).optional(),
 
 		/** Pinned, because "the current default" is not a reproducible answer. */
-		COMPOSER_MODEL: z.string().min(1).default("openai/gpt-oss-20b:free"),
+		COMPOSER_MODEL: z.string().min(1).default("google/gemini-2.5-flash"),
 
 		/* ---------------------------------------------------------------------
 	   Egress — step 1 of PLAN.md's build order.

@@ -545,10 +545,25 @@ will be missing in production.
 | Phase 1 | enrichment model pin, crawler ingest token |
 | Phase 2 | broker base URL, per-provider budget ceilings |
 
-For the LLM stages go through `@cheela/provider` rather than a vendor SDK.
-Routing, reranking, planning and composition have genuinely different cost and
-latency profiles, and you will want a different model pinned per stage and to
-change your mind about all four.
+For the LLM stages, keep a seam that lets a different model be pinned per stage
+— routing, reranking, planning and composition have genuinely different cost and
+latency profiles and you will want to change your mind about all four.
+
+**That seam is `src/infra/model`, not `@cheela/provider`, and this overrules an
+earlier line in this plan.** Every provider in that package calls
+`assertHasCapabilities`, which refuses a request carrying no tools. Its reasoning
+is sound for what it is for: an agent runtime with an empty tool list is a plain
+chat completion wearing an assistant's clothes, and it fails silently. But
+**composition is not an agent runtime, and its having no tools is a security
+property** — the structural half of the injection containment, asserted by a
+test. Registering a dummy capability to satisfy that check would hand a model
+reading untrusted page content something to call, which is the exact thing the
+design forbids.
+
+So the model call goes through the egress client instead, which is a consequence
+worth having rather than a compromise: "one client, one policy" now covers the
+LLM call too, with the same deadline, size cap and address rules as a page
+fetch.
 
 ---
 

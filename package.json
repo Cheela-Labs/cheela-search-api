@@ -17,8 +17,6 @@
 		"db:migrate": "tsx src/migrate.ts"
 	},
 	"dependencies": {
-		"@cheela/protocol": "^0.6.0",
-		"@cheela/provider": "^0.8.0",
 		"@hono/node-server": "^2.0.10",
 		"@mozilla/readability": "^0.6.0",
 		"hono": "^4.9.8",
