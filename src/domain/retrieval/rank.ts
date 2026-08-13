@@ -37,6 +37,8 @@ export type Passage = Chunk & {
 	url: string;
 	domain: string;
 	title: string | null;
+	/** The document's `og:image`, carried so the source list can show it. */
+	image: string | null;
 	score: number;
 };
 
@@ -160,6 +162,7 @@ export async function selectPassages(
 				url: page.extraction.canonicalUrl,
 				domain: page.domain,
 				title: page.extraction.title,
+				image: page.extraction.image,
 				score: 0,
 			});
 		}

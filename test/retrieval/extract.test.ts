@@ -147,3 +147,63 @@ describe("extract · details that downstream depends on", () => {
 		if (result.ok) expect(result.extraction.text).toContain("\n");
 	});
 });
+
+/**
+ * The image is what a shopping result renders as its picture, so a wrong one is
+ * visible to every reader rather than buried in a score. These fix the three
+ * ways it can be wrong: pointing somewhere unreachable, pointing at a scheme the
+ * browser will not load, and carrying bytes the page chose rather than a link.
+ */
+describe("extract · the page's own image", () => {
+	const withHead = (head: string) =>
+		`<html><head>${head}</head><body><article><h1>T</h1><p>${"Body sentence with enough text to extract. ".repeat(8)}</p></article></body></html>`;
+
+	const imageOf = (head: string, url = "https://shop.test/product/1") => {
+		const result = extract(withHead(head), url);
+		expect(result.ok).toBe(true);
+		return result.ok ? result.extraction.image : null;
+	};
+
+	it("takes og:image", () => {
+		expect(
+			imageOf('<meta property="og:image" content="https://cdn.test/a.jpg">'),
+		).toBe("https://cdn.test/a.jpg");
+	});
+
+	it("resolves a relative image against the page it came from", () => {
+		expect(imageOf('<meta property="og:image" content="/img/a.jpg">')).toBe(
+			"https://shop.test/img/a.jpg",
+		);
+	});
+
+	it("upgrades http to https, which is the common real-world shape", () => {
+		// Observed on live Shopify storefronts: the tag is written http, the CDN
+		// serves both, and left alone the browser blocks it as mixed content.
+		expect(
+			imageOf('<meta property="og:image" content="http://cdn.test/a.jpg">'),
+		).toBe("https://cdn.test/a.jpg");
+	});
+
+	it("refuses a data: URI rather than embedding a page's bytes", () => {
+		expect(
+			imageOf(
+				'<meta property="og:image" content="data:image/svg+xml,<svg onload=alert(1)/>">',
+			),
+		).toBeNull();
+	});
+
+	// Not hypothetical: `new URL("::not a url::", base)` resolves rather than
+	// throwing, so without the whitespace guard this returns a confident link to
+	// `https://shop.test/product/::not%20a%20url::` and the fallback never runs.
+	it("falls back to twitter:image, past an og:image that is not a URL", () => {
+		expect(
+			imageOf(
+				'<meta property="og:image" content="::not a url::"><meta name="twitter:image" content="https://cdn.test/b.jpg">',
+			),
+		).toBe("https://cdn.test/b.jpg");
+	});
+
+	it("is null when the page declares nothing, rather than guessing", () => {
+		expect(imageOf("<title>T</title>")).toBeNull();
+	});
+});

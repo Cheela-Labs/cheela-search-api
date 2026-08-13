@@ -284,6 +284,48 @@ a dead end. Phase 2 changes one line.
 `2.5-flash`. Routing picks one of three words on every query; composition writes
 the answer once. This is the first stage to use the per-stage model pin the seam
 was built for.
+→ **The label alone did nothing, and that was measurable.** Classifying "nike
+jordans" as discovery and then searching for "nike jordans" retrieved
+Wikipedia's Air Jordan article and a sneaker blog — the verdict was correct and
+changed no result, because the index was asked the same question either way. So
+the router now returns a **rewritten retrieval query** alongside the intent
+("buy nike jordan sneakers online store"), and discovery runs a second upstream
+search with it. Chained off the classifier rather than sequenced after the first
+search, so it overlaps the search already in flight instead of following it; the
+merged candidate list is interleaved and capped at `limit + 4`. Result on that
+query: 2 sources → 9 destinations, including nike.com, finishline, jdsports and
+flightclub.
+
+**W · Where to go** — `places` events. — *built 2026-08-13, with routing.*
+Destinations for discovery queries: a link, a host, a title and the page's own
+`og:image`.
+→ *Why this is not the source rail with pictures.* A `Source` is evidence and
+carries passages a citation can point at. On a discovery query the pages most
+worth showing are precisely the ones that **cannot be read** — storefronts
+render their catalogues in JavaScript, so they extract to nothing. Eight of
+twelve pages retrieved for "nike jordans" failed extraction. Built from sources,
+this row would be empty on exactly the queries it exists for.
+→ *The head survives what the body does not.* A JavaScript shell still ships a
+complete `<head>`, so `extract()` now returns a `preview` on every failure path
+after parsing. Nothing about those pages is ever cited and nothing claims they
+said anything; they are destinations, which is a weaker claim and an honest one.
+→ *Images are the page's own `og:image`, never a matched one.* Search providers
+return a bag of query-matched images next to their results, and pairing image
+*n* with result *n* yields a beautiful grid asserting a relationship that does
+not exist — measured on a live "nike jordans buy india" query, four of five
+returned images were hosted by a retailer absent from the results. Taking the
+image from the page the card links to makes the pairing true by construction.
+→ *There are no prices, and there will not be until something can read one.*
+Sixteen live results across three shopping queries carried zero `Product`
+offers: what a search engine returns for a shopping query is storefront and
+category pages, not product pages. A card asserting a price it had not read
+would be inventing the one number a reader most needs to trust.
+→ *What is not reachable, and why we are not fixing it that way.* Of the
+retailers named in the original request, ajio 403s, myntra times out, nike.com
+cross-host-redirects to nike.in, and amazon.in's search page carries neither
+JSON-LD nor `og:image`. Spoofing a browser user agent would get past most of
+that and is refused for the same reason as in step 4 above. Amazon.in *does*
+appear with an image on queries where the upstream returns a category page.
 
 **5 · Chunk, embed, rerank** — `src/domain/retrieval/`. — *chunk and rank done; embed deferred.*
 Keep ~12 passages.

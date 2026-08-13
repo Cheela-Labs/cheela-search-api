@@ -88,12 +88,47 @@ export type Source = {
 	url: string;
 	title: string;
 	swatch: string;
+	/**
+	 * The source page's own `og:image`, when it declares one.
+	 *
+	 * Optional and frequently absent, so the surface must render without it —
+	 * roughly a fifth of pages carry no such tag, and the ones that block us
+	 * outright never get here at all. It is the page's declared image, not a
+	 * product photo we found somewhere and matched to this link.
+	 */
+	image?: string;
 	capturedLabel?: string;
 	passages: Passage[];
 };
 
+/**
+ * Somewhere to go, as opposed to something we read.
+ *
+ * A `Source` is evidence: it has passages, it carries a citation number, and the
+ * answer is allowed to claim it said something. A `Place` is a destination and
+ * makes no such claim — it exists precisely because the pages a discovery query
+ * most wants to show are the ones that cannot be read. Storefronts render their
+ * catalogues in JavaScript, so they extract to nothing while still publishing a
+ * complete `<head>`; eight of twelve pages retrieved for "nike jordans" failed
+ * extraction, and dropping them left the reader with an encyclopedia article.
+ *
+ * Nothing here is ever cited, and that is the point of the separate type rather
+ * than a flag on `Source`.
+ */
+export type Place = {
+	id: string;
+	domain: string;
+	/** Where the reader is sent. After redirects, when there were any. */
+	url: string;
+	title: string;
+	swatch: string;
+	/** The page's own `og:image`, when it declared one. */
+	image?: string;
+};
+
 export type SearchEvent =
 	| { type: "intent"; intent: Intent }
+	| { type: "places"; places: Place[] }
 	| { type: "stage"; stage: Stage }
 	| { type: "crawled"; count: number }
 	| { type: "source"; source: Source }

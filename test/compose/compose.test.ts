@@ -32,6 +32,7 @@ const passage = (
 	url: `https://${domain}/page`,
 	domain,
 	title: `${domain} title`,
+	image: null,
 	score: 1,
 });
 

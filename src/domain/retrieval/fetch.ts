@@ -1,6 +1,11 @@
 import type { EgressClient } from "../../infra/egress/client";
 import { EgressError } from "../../infra/egress/errors";
-import { type Extraction, type ExtractionFailure, extract } from "./extract";
+import {
+	type Extraction,
+	type ExtractionFailure,
+	extract,
+	type PagePreview,
+} from "./extract";
 
 /**
  * Fetch and extract, in parallel, dropping what does not arrive.
@@ -37,9 +42,22 @@ export type RetrievalOutcome =
 	| {
 			ok: false;
 			requestedUrl: string;
+			/** After redirects, when a response arrived at all. */
+			finalUrl?: string;
+			domain?: string;
 			/** An egress refusal, an HTTP status, or an extraction failure. */
 			reason: ExtractionFailure | "http-error" | string;
 			detail: string;
+			/**
+			 * What the page said about itself, when it parsed but could not be read.
+			 *
+			 * A failed extraction is still a failed extraction — this page will never
+			 * be cited and nothing will claim it said anything. But a storefront that
+			 * renders its catalogue in JavaScript is the single most common failure
+			 * on a discovery query, and its `<head>` is intact. Keeping it is the
+			 * difference between "we found twelve shops" and showing none of them.
+			 */
+			preview?: PagePreview;
 	  };
 
 export type RetrievalStats = {
@@ -78,6 +96,8 @@ async function retrieveOne(
 			return {
 				ok: false,
 				requestedUrl: url,
+				finalUrl: response.url,
+				domain: new URL(response.url).hostname,
 				reason: "http-error",
 				detail: `status ${response.status}`,
 			};
@@ -92,8 +112,11 @@ async function retrieveOne(
 			return {
 				ok: false,
 				requestedUrl: url,
+				finalUrl: response.url,
+				domain: new URL(response.url).hostname,
 				reason: result.reason,
 				detail: result.detail,
+				preview: result.preview,
 			};
 		}
 

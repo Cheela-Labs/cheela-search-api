@@ -1,9 +1,10 @@
 import type { EgressClient } from "../infra/egress/client";
 import type { SearchRotation } from "../infra/upstream/rotation";
-import type { SearchEvent } from "../shared/events";
+import type { Candidate } from "../infra/upstream/types";
+import type { Place, SearchEvent } from "../shared/events";
 import type { Composer } from "./compose/types";
 import { sourcesFrom, swatchFor } from "./compose/types";
-import { retrievePages } from "./retrieval/fetch";
+import { type RetrievalOutcome, retrievePages } from "./retrieval/fetch";
 import { selectPassages } from "./retrieval/rank";
 import type { Classifier } from "./route/classifier";
 import { routeStructurally } from "./route/structural";
@@ -38,6 +39,124 @@ export type PipelineDeps = {
 
 const DEFAULT_CANDIDATES = 8;
 const DEFAULT_PASSAGES = 12;
+
+/**
+ * How many extra pages a discovery query may read, over the normal budget.
+ *
+ * Not zero, because two searches merged into one budget would halve the general
+ * results a discovery answer still needs — "best laptop for video editing"
+ * wants the review that compares them as much as the shop that sells them. Not
+ * large either: the read stage runs six at a time, so this is one extra wave at
+ * most and the deadline is per page regardless.
+ */
+const DISCOVERY_EXTRA = 4;
+
+/**
+ * Merges two candidate lists, alternating, keeping the first sight of each URL.
+ *
+ * `primary` goes first at every step because on a discovery query it is the
+ * rewritten search — the one that went looking for places. Alternating rather
+ * than concatenating matters: the tail of a list is where the weak results live,
+ * and appending would spend the extra budget on one list's dregs while the other
+ * list's second-best result never got fetched.
+ */
+function interleave(
+	primary: readonly Candidate[],
+	secondary: readonly Candidate[],
+	limit: number,
+): Candidate[] {
+	const merged: Candidate[] = [];
+	const seen = new Set<string>();
+
+	for (let index = 0; merged.length < limit; index += 1) {
+		const pair = [primary[index], secondary[index]];
+		if (pair[0] === undefined && pair[1] === undefined) break;
+
+		for (const candidate of pair) {
+			if (candidate === undefined || merged.length >= limit) continue;
+			if (seen.has(candidate.url)) continue;
+			seen.add(candidate.url);
+			merged.push(candidate);
+		}
+	}
+
+	return merged;
+}
+
+/**
+ * Turns retrieval outcomes into destinations, in the order they were searched.
+ *
+ * Deliberately built from *outcomes* rather than from pages: the pages are what
+ * extracted, and on a discovery query those are disproportionately the articles
+ * about the thing rather than the places that have it. A storefront that failed
+ * extraction still answered, still has a host, and usually still declared a
+ * title and an image — all a link needs.
+ *
+ * A candidate that never got a response is dropped. We know nothing about it
+ * beyond an upstream provider's assertion that it exists, and sending a reader
+ * somewhere we could not reach ourselves is worse than showing one fewer card.
+ */
+function placesFrom(
+	candidates: readonly Candidate[],
+	outcomes: readonly RetrievalOutcome[],
+	/** URLs the rewritten, places-seeking search returned. */
+	preferred: ReadonlySet<string>,
+): Place[] {
+	const byUrl = new Map(
+		outcomes.map((outcome) => [
+			outcome.ok ? outcome.page.requestedUrl : outcome.requestedUrl,
+			outcome,
+		]),
+	);
+
+	const ranked: { place: Place; rank: number }[] = [];
+	const seen = new Set<string>();
+
+	for (const candidate of candidates) {
+		const outcome = byUrl.get(candidate.url);
+		if (outcome === undefined) continue;
+
+		const resolved = outcome.ok
+			? {
+					url: outcome.page.finalUrl,
+					domain: outcome.page.domain,
+					title: outcome.page.extraction.title,
+					image: outcome.page.extraction.image,
+				}
+			: {
+					url: outcome.finalUrl,
+					domain: outcome.domain,
+					title: outcome.preview?.title ?? null,
+					image: outcome.preview?.image ?? null,
+				};
+
+		// No `finalUrl` means no response arrived — a refused address, a timeout,
+		// a connection that never opened.
+		if (!resolved.url || !resolved.domain) continue;
+		if (seen.has(resolved.domain)) continue;
+		seen.add(resolved.domain);
+
+		ranked.push({
+			place: {
+				id: `place-${ranked.length}`,
+				domain: resolved.domain,
+				url: resolved.url,
+				title: resolved.title ?? candidate.title ?? resolved.domain,
+				swatch: swatchFor(resolved.domain),
+				...(resolved.image ? { image: resolved.image } : {}),
+			},
+			// Two preferences, in this order. Coming from the rewritten search
+			// outranks having a picture, because that search is the one that asked
+			// for places: Wikipedia's Air Jordan article has an excellent image and
+			// is not a shop, and sorting on the picture alone floats it to the top
+			// of a row whose entire purpose is telling the reader where to go.
+			rank: (preferred.has(candidate.url) ? 0 : 2) + (resolved.image ? 0 : 1),
+		});
+	}
+
+	// Stable, so within a rank the upstream's own ordering survives.
+	return ranked.sort((a, b) => a.rank - b.rank).map((entry) => entry.place);
+}
 
 /**
  * The navigational answer: the site, and nothing else.
@@ -110,15 +229,33 @@ export async function* runPipeline(
 		// every remaining intent reads the same pages — so a classifier that
 		// resolves inside the search's own 500–1700 ms costs nothing at all.
 		// Awaiting it first would add its full latency to every query.
+		const limit = deps.candidateLimit ?? DEFAULT_CANDIDATES;
 		const classifying = deps.classifier(query, signal);
+		const searching = deps.upstream.search(query, { limit, signal });
 
-		const found = await deps.upstream.search(query, {
-			limit: deps.candidateLimit ?? DEFAULT_CANDIDATES,
-			signal,
-		});
+		// A discovery query gets a second search, for the places rather than the
+		// explanations — "nike jordans" returns Wikipedia, "buy nike jordan
+		// sneakers online store" returns shops.
+		//
+		// Chained off the classifier rather than sequenced after the first search,
+		// which is what keeps it close to free: the router resolves well inside
+		// the upstream's own latency, so this call overlaps the search already in
+		// flight instead of following it.
+		const supplementing = classifying.then((route) =>
+			route.intent === "discovery" && route.retrievalQuery
+				? deps.upstream.search(route.retrievalQuery, { limit, signal })
+				: null,
+		);
+		// A supplementary search is an improvement, never a dependency. If it
+		// fails the query still has its primary candidates, and turning that into
+		// a failed search would make discovery queries *less* reliable than the
+		// ones that never asked for the extra work.
+		const supplemented = supplementing.catch(() => null);
+
+		const found = await searching;
 		if (aborted()) return;
 
-		const intent = await classifying;
+		const { intent } = await classifying;
 		yield { type: "intent", intent };
 
 		if (found.provider === null) {
@@ -133,19 +270,26 @@ export async function* runPipeline(
 			return;
 		}
 
-		yield { type: "crawled", count: found.candidates.length };
+		const extra = await supplemented;
+		if (aborted()) return;
+
+		const candidates = extra
+			? interleave(extra.candidates, found.candidates, limit + DISCOVERY_EXTRA)
+			: found.candidates;
+
+		yield { type: "crawled", count: candidates.length };
 		yield {
 			type: "stage",
 			stage: {
 				id: "search",
 				state: "done",
-				label: found.candidates.length
-					? `Searched ${found.candidates.length} sources`
+				label: candidates.length
+					? `Searched ${candidates.length} sources`
 					: "Searched the index — no candidates",
 			},
 		};
 
-		if (found.candidates.length === 0) {
+		if (candidates.length === 0) {
 			yield {
 				type: "stage",
 				stage: { id: "compose", state: "done", label: "Nothing to read" },
@@ -160,7 +304,7 @@ export async function* runPipeline(
 		};
 
 		const { outcomes, stats } = await retrievePages(
-			found.candidates.map((candidate) => candidate.url),
+			candidates.map((candidate) => candidate.url),
 			{ client: deps.egress },
 		);
 		if (aborted()) return;
@@ -168,6 +312,19 @@ export async function* runPipeline(
 		const pages = outcomes.flatMap((outcome) =>
 			outcome.ok ? [outcome.page] : [],
 		);
+
+		// Destinations, for a query that asked where to go. Emitted here rather
+		// than after ranking because they do not depend on it — a place needs a
+		// URL and a picture, not a passage — and this is a full rank plus a model
+		// call earlier than the answer.
+		if (intent === "discovery") {
+			const places = placesFrom(
+				candidates,
+				outcomes,
+				new Set(extra?.candidates.map((candidate) => candidate.url) ?? []),
+			);
+			if (places.length > 0) yield { type: "places", places };
+		}
 
 		yield {
 			type: "stage",

@@ -45,14 +45,47 @@ export type Extraction = {
 	title: string | null;
 	/** `<link rel="canonical">` resolved against the fetched URL, else that URL. */
 	canonicalUrl: string;
+	/**
+	 * The page's own `og:image`, absolute and https, or null.
+	 *
+	 * Taken from the page it will be displayed with, which is the whole point:
+	 * the alternative — pairing a result with an image from somewhere else that
+	 * matched the query — invents a relationship that does not exist. Here the
+	 * pairing is true by construction, and a page that declares no image simply
+	 * has none.
+	 */
+	image: string | null;
 	text: string;
 	/** Of the extracted text, so a page whose only change was an ad slot hashes the same. */
 	contentHash: string;
 };
 
+/**
+ * What a page says about itself in its `<head>`, whether or not it has a body
+ * we could read.
+ *
+ * This exists because of a measured asymmetry: the pages that fail extraction
+ * hardest are storefronts, which are JavaScript shells — and a shell still ships
+ * a complete `<head>`. Eight of twelve pages retrieved for "nike jordans"
+ * extracted nothing, and nearly all of them carried a perfectly good title and
+ * `og:image` the whole time.
+ *
+ * A page we could not read is not a source: there is no passage to cite and we
+ * will not claim it said anything. It can still be a *destination*, and throwing
+ * the head away meant discovery queries retrieved twelve shops and could show
+ * none of them.
+ */
+export type PagePreview = { title: string | null; image: string | null };
+
 export type ExtractionResult =
 	| { ok: true; extraction: Extraction }
-	| { ok: false; reason: ExtractionFailure; detail: string };
+	| {
+			ok: false;
+			reason: ExtractionFailure;
+			detail: string;
+			/** Present whenever the document parsed, even though the body did not survive. */
+			preview?: PagePreview;
+	  };
 
 export type ExtractOptions = {
 	/** From the response, when there is one. */
@@ -170,6 +203,73 @@ function canonicalFrom(document: Document, url: string): string {
 	}
 }
 
+/**
+ * The page's declared preview image, in the order publishers actually set it.
+ *
+ * Two rules that are not cosmetic:
+ *
+ * - **http is upgraded to https.** The surface is served over https, so a
+ *   plain-http image is blocked as mixed content and renders as a hole. Every
+ *   host seen doing this in practice wrote the tag against a CDN that serves
+ *   both; upgrading turns a guaranteed failure into a very likely success.
+ * - **Only http(s) survives.** `data:` URIs would embed arbitrary attacker
+ *   bytes from an untrusted page directly into our response.
+ */
+function imageFrom(document: Document, url: string): string | null {
+	const selectors = [
+		'meta[property="og:image:secure_url"]',
+		'meta[property="og:image"]',
+		'meta[name="og:image"]',
+		'meta[name="twitter:image"]',
+		'meta[name="twitter:image:src"]',
+	];
+
+	for (const selector of selectors) {
+		const content = document
+			.querySelector(selector)
+			?.getAttribute("content")
+			?.trim();
+		if (!content) continue;
+
+		// Whitespace is never legal in a URL reference, and without this check it
+		// is not caught: `new URL("::not a url::", base)` does not throw, it
+		// resolves as a *relative* path and yields a confident link to nothing.
+		// Every malformed value would become a broken image rather than no image.
+		if (/\s/.test(content)) continue;
+
+		try {
+			const resolved = new URL(content, url);
+			if (resolved.protocol === "http:") resolved.protocol = "https:";
+			if (resolved.protocol !== "https:") continue;
+			return resolved.toString();
+		} catch {
+			// A malformed image URL is the page's problem. Try the next tag.
+		}
+	}
+
+	return null;
+}
+
+/** The page's own name for itself, preferring what it chose to be shared as. */
+function titleFrom(document: Document): string | null {
+	const candidates = [
+		document
+			.querySelector('meta[property="og:title"]')
+			?.getAttribute("content"),
+		document
+			.querySelector('meta[name="twitter:title"]')
+			?.getAttribute("content"),
+		document.querySelector("title")?.textContent,
+	];
+
+	for (const candidate of candidates) {
+		const trimmed = candidate?.replace(/\s+/g, " ").trim();
+		if (trimmed) return trimmed;
+	}
+
+	return null;
+}
+
 export function extract(
 	html: string,
 	url: string,
@@ -210,6 +310,13 @@ export function extract(
 		return { ok: false, reason: "unparseable", detail: "no body element" };
 	}
 
+	// Read now, before Readability is allowed to mutate the document — and before
+	// any of the failure returns below, all of which carry it.
+	const preview: PagePreview = {
+		title: titleFrom(document),
+		image: imageFrom(document, url),
+	};
+
 	const rawText = (document.body.textContent ?? "").trim();
 
 	// A shell is a page whose content is somewhere we cannot reach. Distinguished
@@ -224,6 +331,7 @@ export function extract(
 				ok: false,
 				reason: "javascript-shell",
 				detail: `${rawText.length} chars of text behind ${scripts} script tag(s)`,
+				preview,
 			};
 		}
 	}
@@ -231,10 +339,15 @@ export function extract(
 	const canonicalUrl = canonicalFrom(document, url);
 
 	// Readability mutates the document it is given, and we read the canonical
-	// above first for exactly that reason.
+	// and the image above first for exactly that reason.
 	const article = new Readability(document as never).parse();
 	if (!article?.content) {
-		return { ok: false, reason: "no-main-content", detail: "no article found" };
+		return {
+			ok: false,
+			reason: "no-main-content",
+			detail: "no article found",
+			preview,
+		};
 	}
 
 	// A complete document, not a bare `<body>` wrapper. linkedom parses the
@@ -250,14 +363,16 @@ export function extract(
 			ok: false,
 			reason: "too-short",
 			detail: `${text.length} chars, need ${minChars}`,
+			preview,
 		};
 	}
 
 	return {
 		ok: true,
 		extraction: {
-			title: article.title?.trim() || null,
+			title: article.title?.trim() || preview.title,
 			canonicalUrl,
+			image: preview.image,
 			text,
 			contentHash: createHash("sha256").update(text).digest("hex"),
 		},

@@ -57,7 +57,7 @@ describe("createClassifier", () => {
 			"**discovery**",
 			"Intent: discovery",
 		]) {
-			expect(await createClassifier(model(reply))("q"), reply).toBe(
+			expect((await createClassifier(model(reply))("q")).intent, reply).toBe(
 				"discovery",
 			);
 		}
@@ -68,22 +68,26 @@ describe("createClassifier", () => {
 		["informational", "informational"],
 		["discovery", "discovery"],
 	])("passes through %s", async (reply, expected) => {
-		expect(await createClassifier(model(reply))("q")).toBe(expected);
+		expect((await createClassifier(model(reply))("q")).intent).toBe(expected);
 	});
 
 	it("resolves an unrecognised answer downward, not upward", async () => {
 		// Ambiguity resolves toward showing. Surfacing an action nobody wanted
 		// costs a chip nobody clicks; taking one costs a great deal.
-		expect(await createClassifier(model("transactional"))("q")).toBe(
+		expect((await createClassifier(model("transactional"))("q")).intent).toBe(
 			"informational",
 		);
-		expect(await createClassifier(model(""))("q")).toBe("informational");
+		expect((await createClassifier(model(""))("q")).intent).toBe(
+			"informational",
+		);
 	});
 
 	it("never returns `action`, even when the model says so", async () => {
 		// There is no invoker yet. A route to a capability that cannot be called
 		// is a route to a dead end.
-		expect(await createClassifier(model("action"))("q")).toBe("informational");
+		expect((await createClassifier(model("action"))("q")).intent).toBe(
+			"informational",
+		);
 	});
 
 	it("treats a model failure as informational rather than failing the query", async () => {
@@ -93,6 +97,64 @@ describe("createClassifier", () => {
 				throw new Error("upstream down");
 			},
 		};
-		expect(await createClassifier(broken)("q")).toBe("informational");
+		expect((await createClassifier(broken)("q")).intent).toBe("informational");
+	});
+});
+
+/**
+ * The rewrite is what makes the discovery label do anything. Labelling "nike
+ * jordans" as discovery and then searching "nike jordans" retrieved Wikipedia
+ * and a sneaker blog — the label was right and it changed nothing.
+ */
+describe("classifier · the retrieval rewrite", () => {
+	const model = (reply: string): TextModel => ({
+		name: "stub",
+		async complete() {
+			return reply;
+		},
+	});
+
+	const route = (reply: string) => createClassifier(model(reply))("q");
+
+	it("takes the rewritten query for discovery", async () => {
+		expect(
+			await route("discovery | buy nike jordan sneakers online store"),
+		).toEqual({
+			intent: "discovery",
+			retrievalQuery: "buy nike jordan sneakers online store",
+		});
+	});
+
+	it("collapses a multi-line answer to one query", async () => {
+		expect(
+			(await route("discovery |\n  buy jordans\n  online")).retrievalQuery,
+		).toBe("buy jordans online");
+	});
+
+	it("bounds the rewrite, so the field cannot be used as a channel", async () => {
+		const long = (await route(`discovery | ${"buy shoes ".repeat(60)}`))
+			.retrievalQuery;
+		expect(long).not.toBeNull();
+		expect((long as string).length).toBeLessThanOrEqual(120);
+	});
+
+	it("carries no rewrite when the model ignored the format", async () => {
+		expect(await route("discovery")).toEqual({
+			intent: "discovery",
+			retrievalQuery: null,
+		});
+		expect((await route("discovery |   ")).retrievalQuery).toBeNull();
+	});
+
+	it("never carries a rewrite for a non-discovery intent", async () => {
+		// The pipeline searches it unconditionally when present, so a rewrite
+		// attached to an informational query would silently change what an
+		// ordinary question retrieves.
+		expect(
+			(await route("informational | buy things")).retrievalQuery,
+		).toBeNull();
+		expect(
+			(await route("navigational | buy things")).retrievalQuery,
+		).toBeNull();
 	});
 });

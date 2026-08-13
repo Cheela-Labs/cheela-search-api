@@ -29,6 +29,7 @@ const page = (
 	extraction: {
 		title,
 		canonicalUrl: `https://${domain}/`,
+		image: null,
 		text: paragraphs.join("\n\n"),
 		contentHash: "hash",
 	},
@@ -53,6 +54,7 @@ describe("lexicalRanker", () => {
 			url: `https://d${index}.test/`,
 			domain: `d${index}.test`,
 			title: null,
+			image: null,
 			score: 0,
 		}));
 

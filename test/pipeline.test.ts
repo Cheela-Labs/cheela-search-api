@@ -255,3 +255,121 @@ describe("pipeline · end to end", () => {
 		expect(response.headers.get("content-type")).toContain("application/json");
 	});
 });
+
+/**
+ * Discovery, which is the one intent where the pages worth showing are the ones
+ * we cannot read.
+ *
+ * The shell fixture below is the case that motivated `places` existing at all: a
+ * storefront that renders its catalogue in JavaScript extracts to nothing, so it
+ * never becomes a source, and a "where to buy" row built from sources would be
+ * empty on exactly the queries it is for. Its `<head>` is intact throughout.
+ */
+describe("pipeline · discovery", () => {
+	const shell = (title: string, image: string) =>
+		`<html><head><title>${title}</title>
+			<meta property="og:title" content="${title}">
+			<meta property="og:image" content="${image}"></head>
+			<body><div id="root"></div><script>window.__DATA__={}</script></body></html>`;
+
+	/** Answers one set of URLs for the user's query and another for the rewrite. */
+	const twoQueryUpstream = (byQuery: Record<string, string[]>) =>
+		createRotation([
+			{
+				name: "stub",
+				async search(query, options) {
+					return normaliseCandidates(
+						(byQuery[query] ?? []).map((url) => ({ url })),
+						"stub",
+						options?.limit ?? 10,
+					);
+				},
+			},
+		]);
+
+	const discovering = (retrievalQuery: string | null) => async () => ({
+		intent: "discovery" as const,
+		retrievalQuery,
+	});
+
+	it("shows a shop it could not read, using the head it could", async () => {
+		const port = await serveArticles({
+			"/wiki": article("Encyclopedia", "The sneaker was released in 1985."),
+			"/shop": shell("Buy Jordans", "https://cdn.test/shoe.jpg"),
+		});
+
+		const app = createApp({
+			upstream: twoQueryUpstream({
+				jordans: [`http://wiki.invalid:${port}/wiki`],
+				"buy jordans online": [`http://shop.invalid:${port}/shop`],
+			}),
+			egress: loopbackEgress(),
+			composer: extractiveComposer,
+			classifier: discovering("buy jordans online"),
+		});
+
+		const events = await collect(await app.request("/search?q=jordans"));
+		const places = events.flatMap((event) =>
+			event.type === "places" ? event.places : [],
+		);
+		const sources = events.flatMap((event) =>
+			event.type === "source" ? [event.source] : [],
+		);
+
+		// The shop is a place and is emphatically not a source: nothing extracted
+		// from it, so nothing may cite it.
+		expect(places.map((place) => place.domain)).toContain("shop.invalid");
+		expect(sources.map((source) => source.domain)).not.toContain(
+			"shop.invalid",
+		);
+
+		const shop = places.find((place) => place.domain === "shop.invalid");
+		expect(shop?.image).toBe("https://cdn.test/shoe.jpg");
+		expect(shop?.title).toBe("Buy Jordans");
+	});
+
+	it("leads with the search that went looking for places", async () => {
+		const port = await serveArticles({
+			"/wiki": article("Encyclopedia", "The sneaker was released in 1985."),
+			"/shop": shell("Buy Jordans", "https://cdn.test/shoe.jpg"),
+		});
+
+		const app = createApp({
+			upstream: twoQueryUpstream({
+				jordans: [`http://wiki.invalid:${port}/wiki`],
+				"buy jordans online": [`http://shop.invalid:${port}/shop`],
+			}),
+			egress: loopbackEgress(),
+			composer: extractiveComposer,
+			classifier: discovering("buy jordans online"),
+		});
+
+		const events = await collect(await app.request("/search?q=jordans"));
+		const places = events.flatMap((event) =>
+			event.type === "places" ? event.places : [],
+		);
+
+		// Both have an image, so a picture-first sort would be a coin toss. The
+		// shop must win because it came from the query that asked for shops.
+		expect(places[0]?.domain).toBe("shop.invalid");
+	});
+
+	it("emits no places for an ordinary question", async () => {
+		const port = await serveArticles({
+			"/a": article("Alpha", "Cloudflare Workers have no cold start."),
+		});
+
+		const app = createApp({
+			upstream: stubUpstream([`http://a.invalid:${port}/a`]),
+			egress: loopbackEgress(),
+			composer: extractiveComposer,
+			classifier: async () => ({
+				intent: "informational" as const,
+				retrievalQuery: null,
+			}),
+		});
+
+		const events = await collect(await app.request("/search?q=cold%20start"));
+		expect(events.map((event) => event.type)).not.toContain("places");
+	});
+});

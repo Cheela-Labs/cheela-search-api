@@ -36,6 +36,13 @@ export type Composer = {
  * and a layout-shift source on the one screen that should feel fast. A hue
  * derived from the host is neither, and it is stable across queries, which is
  * what makes it useful as recognition rather than decoration.
+ *
+ * `Source.image` does now make third-party image requests, which looks like a
+ * reversal and is not. A favicon buys recognition that a hue already buys for
+ * free; an `og:image` on a shopping result *is* the information the reader came
+ * for, and no locally-computed stand-in can substitute for it. The cost is the
+ * same and the return is not, so the trade lands differently. The swatch remains
+ * the fallback for every source that declares no image — which is most of them.
  */
 export function swatchFor(domain: string): string {
 	let hash = 0;
@@ -87,6 +94,9 @@ export function sourcesFrom(passages: readonly Passage[]): CitedSource[] {
 			url: passage.url,
 			title: passage.title ?? passage.domain,
 			swatch: swatchFor(passage.domain),
+			// Omitted rather than set to null: the field is optional on the wire,
+			// and an absent key is one less thing for the surface to branch on.
+			...(passage.image ? { image: passage.image } : {}),
 			documentIndex: passage.documentIndex,
 			passages: [
 				{
