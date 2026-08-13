@@ -134,6 +134,13 @@ const schema = z
 		/** Pinned, because "the current default" is not a reproducible answer. */
 		COMPOSER_MODEL: z.string().min(1).default("google/gemini-2.5-flash"),
 
+		/**
+		 * Deliberately cheaper than the composer's. Routing chooses one of three
+		 * words and runs on every query; composition writes the answer and runs
+		 * once. Shares COMPOSER_API_KEY — one vendor account, two model pins.
+		 */
+		ROUTER_MODEL: z.string().min(1).default("google/gemini-2.5-flash-lite"),
+
 		/* ---------------------------------------------------------------------
 	   Egress — step 1 of PLAN.md's build order.
 

@@ -2,9 +2,11 @@ import type { EgressClient } from "../infra/egress/client";
 import type { SearchRotation } from "../infra/upstream/rotation";
 import type { SearchEvent } from "../shared/events";
 import type { Composer } from "./compose/types";
-import { sourcesFrom } from "./compose/types";
+import { sourcesFrom, swatchFor } from "./compose/types";
 import { retrievePages } from "./retrieval/fetch";
 import { selectPassages } from "./retrieval/rank";
+import type { Classifier } from "./route/classifier";
+import { routeStructurally } from "./route/structural";
 
 /**
  * The query pipeline: query in, events out.
@@ -27,6 +29,7 @@ export type PipelineDeps = {
 	upstream: SearchRotation;
 	egress: EgressClient;
 	composer: Composer;
+	classifier: Classifier;
 	/** Candidate URLs requested from the upstream provider. */
 	candidateLimit?: number;
 	/** Passages kept for composition. */
@@ -35,6 +38,49 @@ export type PipelineDeps = {
 
 const DEFAULT_CANDIDATES = 8;
 const DEFAULT_PASSAGES = 12;
+
+/**
+ * The navigational answer: the site, and nothing else.
+ *
+ * No upstream call, no fetch, no rerank, no model — roughly 350 ms and no cost,
+ * against ~2.6 s and eight page fetches for a query that wanted one link. The
+ * page is not read, so there is nothing to cite and nothing is claimed about
+ * what it says.
+ */
+async function* navigational(url: string): AsyncGenerator<SearchEvent> {
+	const { hostname } = new URL(url);
+
+	yield {
+		type: "stage",
+		stage: { id: "route", state: "done", label: `Going to ${hostname}` },
+	};
+	yield { type: "crawled", count: 0 };
+	yield {
+		type: "source",
+		source: {
+			id: "nav",
+			n: 1,
+			domain: hostname,
+			path: hostname,
+			url,
+			title: hostname,
+			swatch: swatchFor(hostname),
+			passages: [],
+		},
+	};
+	yield {
+		type: "block",
+		block: {
+			kind: "answer",
+			id: "answer",
+			spans: [
+				{ kind: "text", text: hostname },
+				{ kind: "cite", n: 1 },
+			],
+		},
+	};
+	yield { type: "done" };
+}
 
 export async function* runPipeline(
 	query: string,
@@ -49,16 +95,31 @@ export async function* runPipeline(
 			stage: { id: "search", state: "active", label: "Searching the web" },
 		};
 
-		// Phase 0 has no router; every query is informational. Emitted anyway so
-		// the surface's handling of the field is exercised from the first day
-		// rather than the day routing arrives.
-		yield { type: "intent", intent: "informational" };
+		// A query that is already an address needs no index consulted to find the
+		// page it names. This is the one intent worth knowing *before* the search,
+		// and the only one that skips retrieval entirely.
+		const structural = routeStructurally(query);
+		if (structural.intent === "navigational") {
+			yield { type: "intent", intent: "navigational" };
+			yield* navigational(structural.url);
+			return;
+		}
+
+		// Classification runs *concurrently* with the upstream call rather than
+		// ahead of it. The verdict is needed at composition, not at retrieval —
+		// every remaining intent reads the same pages — so a classifier that
+		// resolves inside the search's own 500–1700 ms costs nothing at all.
+		// Awaiting it first would add its full latency to every query.
+		const classifying = deps.classifier(query, signal);
 
 		const found = await deps.upstream.search(query, {
 			limit: deps.candidateLimit ?? DEFAULT_CANDIDATES,
 			signal,
 		});
 		if (aborted()) return;
+
+		const intent = await classifying;
+		yield { type: "intent", intent };
 
 		if (found.provider === null) {
 			// Every provider failed — distinct from every provider finding
@@ -140,6 +201,7 @@ export async function* runPipeline(
 			query,
 			passages,
 			sources,
+			intent,
 			signal,
 		})) {
 			if (aborted()) return;

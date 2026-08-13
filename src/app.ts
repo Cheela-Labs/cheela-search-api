@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { composer } from "./domain/compose";
 import { type PipelineDeps, runPipeline } from "./domain/pipeline";
+import { classifier } from "./domain/route";
 import { databaseReachable } from "./infra/db/pool";
 import { egress } from "./infra/egress";
 import { upstream } from "./infra/upstream";
@@ -33,6 +34,7 @@ export function createApp(overrides: Partial<PipelineDeps> = {}) {
 		upstream: overrides.upstream ?? upstream,
 		egress: overrides.egress ?? egress,
 		composer: overrides.composer ?? composer,
+		classifier: overrides.classifier ?? classifier,
 		candidateLimit: overrides.candidateLimit,
 		passageLimit: overrides.passageLimit,
 	};

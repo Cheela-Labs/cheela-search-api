@@ -264,6 +264,27 @@ many sites block bots as much as it measures extraction. **Redefine the metric
 over pages that did not refuse us**, and count refusals separately, before
 treating 0.90 as reachable.
 
+**R · Routing** — `src/domain/route/`. — *built 2026-08-13, ahead of its phase.*
+Four intents, ambiguity resolving downward.
+→ *Why early:* two of its payoffs need no capability index at all. A
+navigational query answers in **184 ms** against ~8 s, with no upstream call, no
+page fetches and no model — measured, not projected. And intent changes the
+*answer shape*: "nike jordans" gets `ANSWER / OPTIONS / TRADEOFF` naming where
+to buy, not a cited essay on the shoe's history. That second one is the half
+people assume waits for Phase 1, and it does not.
+→ *Two passes, because the budget is 90 ms and a model call is 300–800 ms.* A
+structural pass runs synchronously and answers only "is this literally an
+address" — the one intent that must be known before searching. Everything else
+classifies **concurrently with the upstream call**, resolving inside its
+500–1700 ms, so it costs nothing on the critical path.
+→ *`action` is never returned*, even when a query plainly asks for one. There is
+no invoker yet, and a route to a capability that cannot be called is a route to
+a dead end. Phase 2 changes one line.
+→ *A cheaper model than the composer's* — `gemini-2.5-flash-lite` against
+`2.5-flash`. Routing picks one of three words on every query; composition writes
+the answer once. This is the first stage to use the per-stage model pin the seam
+was built for.
+
 **5 · Chunk, embed, rerank** — `src/domain/retrieval/`. — *chunk and rank done; embed deferred.*
 Keep ~12 passages.
 → *Accepts when:* recall on the labeled set clears the bar, and the numbers are

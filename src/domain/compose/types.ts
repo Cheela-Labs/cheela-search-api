@@ -1,4 +1,4 @@
-import type { AnswerBlock, Source } from "../../shared/events";
+import type { AnswerBlock, Intent, Source } from "../../shared/events";
 import type { Passage } from "../retrieval/rank";
 
 /** One retrieved document, with the citation number the answer refers to it by. */
@@ -6,6 +6,11 @@ export type CitedSource = Source & { documentIndex: number };
 
 export type ComposeInput = {
 	query: string;
+	/**
+	 * What the router decided. Composition is where intent actually changes the
+	 * output — the label alone is worth nothing to a reader.
+	 */
+	intent?: Intent;
 	/** Ranked, best first. Each carries the `documentIndex` its source has. */
 	passages: readonly Passage[];
 	sources: readonly CitedSource[];
