@@ -481,6 +481,33 @@ prerequisite.
 
 Neither number is trustworthy at n=10. Both are large enough that the shape is
 not in doubt.
+
+**Answer schema, revised 2026-08-15 after a review of a live answer.**
+"Australian wildfire" scored 6.5/10 against what Perplexity and Google's AI
+Mode have taught readers to expect. Three of the four faults were composition
+faults and are fixed; the fourth is retrieval and is not.
+
+- **`TRADEOFF` was being filled because it was listed.** The prompt already
+  said "Omit this line if there is nothing real to say" and the model wrote one
+  anyway — for a wildfire query it produced a paragraph on how results depend
+  on the discovery service. A stronger instruction was not the fix; not
+  offering the section was. It now appears only on comparative queries, where
+  the trade *is* the answer.
+- **`FACTS` replaces it on informational queries**, and asks for dates,
+  quantities, names and scale. The same query now returns 800 deaths since
+  1851, 100 million hectares in 1974-75, 173 killed at Black Saturday, $A1.9bn
+  insured losses.
+- **`RELATED` emits a `suggestions` block**, which the wire type and
+  `apps/search-web`'s `SuggestionsCard` had both carried since before anything
+  produced one. The drift ran the harmless way — a renderer with no data — and
+  is exactly the drift the events test exists to catch.
+- **Still unfixed: the answer does not lead with the dominant instance.** It
+  opens on "a common and significant natural occurrence… for millions of
+  years" and never names Black Summer, despite an explicit prompt rule to lead
+  with the specific thing that made a broad subject worth searching. The
+  passages do not carry a strong Black Summer narrative to lead with, which
+  makes this a **retrieval** problem wearing a composition problem's clothes —
+  and plausibly the same one the 59% extraction rate describes.
 Every stage here has a plausible-sounding improvement that makes end-to-end
 quality worse — a better embedding model that loses proper nouns, a cheaper
 extractor that drops the answer. Without per-stage measurement you will ship all

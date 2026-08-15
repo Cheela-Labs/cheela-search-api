@@ -54,8 +54,37 @@ export function toSpans(text: string, sourceCount: number): Span[] {
 			anyKept = true;
 		}
 		if (!anyKept) {
-			// Every number in this bracket was invented. Nothing is emitted, and
-			// the surrounding text closes over the gap.
+			/*
+			  Every number in this bracket was invented. Nothing is emitted — but
+			  the *space* in front of it survives, and "bushfires [7]." becomes
+			  "bushfires ." with a gap before the full stop.
+
+			  Visible in a real answer, and visible exactly when a citation was
+			  invented: the reader sees a typographic tell for a failure they are
+			  not supposed to notice at all. Dropping the claim's evidence quietly
+			  is the deliberate behaviour; advertising it with stray whitespace is
+			  not.
+
+			  So the trailing space is removed when the text that follows opens
+			  with punctuation. Only then — between two words a single space is
+			  correct and collapsing it would join them.
+			*/
+			const next = text.slice(cursor);
+			const last = spans[spans.length - 1];
+			if (last?.kind === "text" && /\s$/.test(last.text)) {
+				// Two shapes, one rule: drop our trailing whitespace whenever what
+				// follows supplies its own separator or needs none.
+				//
+				//   "continent [7]."      → "continent."     (punctuation follows)
+				//   "Fires [7] shaped"    → "Fires shaped"   (a space follows)
+				//
+				// The second case was missed on the first attempt and left a double
+				// space — less obvious than a gap before a full stop, and just as
+				// much a tell.
+				if (/^[.,;:!?)\]]/.test(next) || /^\s/.test(next)) {
+					last.text = last.text.replace(/\s+$/, "");
+				}
+			}
 		}
 
 		match = CITATION.exec(text);

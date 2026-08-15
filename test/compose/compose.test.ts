@@ -9,7 +9,7 @@ import {
 } from "../../src/domain/compose/types";
 import type { Passage } from "../../src/domain/retrieval/rank";
 import type { CompletionRequest, TextModel } from "../../src/infra/model/types";
-import type { AnswerBlock } from "../../src/shared/events";
+import type { AnswerBlock, Span } from "../../src/shared/events";
 
 /**
  * Composition, against a stub `Provider` rather than a model.
@@ -88,7 +88,12 @@ describe("toSpans", () => {
 		const spans = toSpans("Claim [7].", 2);
 		expect(spans.some((span) => span.kind === "cite")).toBe(false);
 		// The claim itself survives — it is the attribution that was invented.
-		expect(spans).toEqual([{ kind: "text", text: "Claim ." }]);
+		//
+		// This line read `"Claim ."` until 2026-08-15, encoding the defect rather
+		// than catching it: the bracket was removed and the space before it was
+		// not, so a real answer rendered "…thrive on bushfires ." A test can
+		// pin a bug in place as easily as it pins behaviour.
+		expect(spans).toEqual([{ kind: "text", text: "Claim." }]);
 	});
 
 	it("drops [0] and keeps the rest of a mixed bracket", () => {
@@ -303,5 +308,194 @@ describe("llm composer", () => {
 			}),
 		);
 		expect(blocks).toEqual([]);
+	});
+});
+
+/**
+ * The answer *schema*, which is a product decision the prompt encodes.
+ *
+ * These came out of a review of a real answer for "Australian wildfire",
+ * scored 6.5/10 against what Perplexity and Google's AI Mode set as the
+ * expectation. Two of the three faults were schema faults rather than
+ * retrieval faults, which is why they are asserted here.
+ */
+describe("answer schema by query type", () => {
+	const passages = [
+		passage(
+			0,
+			"a.test",
+			"The 2019-20 Black Summer fires burned 24 million hectares.",
+		),
+		passage(1, "b.test", "Eucalyptus oils are highly flammable."),
+	];
+	const sources = sourcesFrom(passages) as CitedSource[];
+
+	async function systemFor(query: string): Promise<string> {
+		const model = stubModel("ANSWER: Something [1].");
+		await collect(
+			createLlmComposer({ model }).compose({ query, passages, sources }),
+		);
+		return model.seen[0]?.system ?? "";
+	}
+
+	/**
+	 * The fault the review actually named.
+	 *
+	 * TRADEOFF was being filled because it was listed, not because a tradeoff
+	 * existed — "Australian wildfire" produced a paragraph about how results
+	 * depend on the discovery service, which answers a question nobody asked.
+	 * The old prompt already said "Omit this line if there is nothing real to
+	 * say", so the fix is not a stronger instruction; it is not offering the
+	 * section.
+	 */
+	it("offers no TRADEOFF section on a query that is not a decision", async () => {
+		const system = await systemFor("australian wildfire");
+		expect(system).not.toContain("TRADEOFF");
+		expect(system).toContain("FACTS:");
+	});
+
+	it("offers TRADEOFF when the query is comparative", async () => {
+		for (const query of [
+			"react vs vue",
+			"mongodb versus postgres",
+			"difference between grpc and rest",
+			"should i use tailwind or css modules",
+		]) {
+			expect(await systemFor(query)).toContain("TRADEOFF:");
+		}
+	});
+
+	/** A false positive brings back the exact failure this removes. */
+	it("does not mistake an ordinary question for a comparison", async () => {
+		for (const query of [
+			"australian wildfire",
+			"how does bm25 ranking work",
+			"pgvector hnsw index parameters",
+		]) {
+			expect(await systemFor(query)).not.toContain("TRADEOFF");
+		}
+	});
+
+	/** "24 million hectares" beats "fires are common in Australia". */
+	it("asks for specifics and for the dominant instance of a broad subject", async () => {
+		const system = await systemFor("australian wildfire");
+		expect(system).toContain("dates, quantities, names, scale");
+		expect(system.toLowerCase()).toContain("dominant instance");
+	});
+
+	it("turns RELATED into a suggestions block, not a note", async () => {
+		const model = stubModel(
+			[
+				"ANSWER: The Black Summer fires burned 24 million hectares [1].",
+				"FACTS: 33 people died [1].",
+				"RELATED: black summer bushfire timeline",
+				"- why australia has bushfires [1]",
+				"3. current australian fire warnings",
+			].join("\n"),
+		);
+		const blocks = await collect(
+			createLlmComposer({ model }).compose({
+				query: "australian wildfire",
+				passages,
+				sources,
+			}),
+		);
+
+		const suggestions = blocks.find((b) => b.kind === "suggestions");
+		expect(suggestions).toBeDefined();
+		if (suggestions?.kind !== "suggestions") return;
+
+		// Bullets and numbering stripped, and the citation marker removed — a
+		// button that runs a search must not have "[1]" in its label.
+		expect(suggestions.queries).toEqual([
+			"black summer bushfire timeline",
+			"why australia has bushfires",
+			"current australian fire warnings",
+		]);
+		// Not rendered as prose alongside the answer.
+		expect(blocks.some((b) => b.kind === "note" && b.label === "RELATED")).toBe(
+			false,
+		);
+	});
+
+	it("caps suggestions at three", async () => {
+		const model = stubModel(
+			["ANSWER: x [1].", "RELATED: a", "b", "c", "d", "e"].join("\n"),
+		);
+		const blocks = await collect(
+			createLlmComposer({ model }).compose({
+				query: "australian wildfire",
+				passages,
+				sources,
+			}),
+		);
+		const suggestions = blocks.find((b) => b.kind === "suggestions");
+		if (suggestions?.kind !== "suggestions") throw new Error("no suggestions");
+		expect(suggestions.queries).toHaveLength(3);
+	});
+});
+
+/**
+ * What a dropped citation leaves behind.
+ *
+ * Invented citations are dropped and the claim kept — deliberate, and the
+ * right call. But the space in front of the bracket survived, so a real answer
+ * read "eucalyptus forests have evolved to thrive on bushfires ." The reader
+ * gets a typographic tell for a failure they were never meant to notice.
+ */
+describe("text around a dropped citation", () => {
+	const passages = [passage(0, "a.test", "One real source.")];
+	const sources = sourcesFrom(passages) as CitedSource[];
+
+	function textOf(spans: Span[]): string {
+		return spans.map((s) => (s.kind === "text" ? s.text : `[${s.n}]`)).join("");
+	}
+
+	it("closes the space before punctuation when the citation is invented", async () => {
+		const model = stubModel("ANSWER: Fires shaped the continent [7].");
+		const blocks = await collect(
+			createLlmComposer({ model }).compose({
+				query: "australian wildfire",
+				passages,
+				sources,
+			}),
+		);
+		const answer = blocks.find((b) => b.kind === "answer");
+		if (answer?.kind !== "answer") throw new Error("no answer");
+
+		expect(textOf(answer.spans)).toBe("Fires shaped the continent.");
+		expect(textOf(answer.spans)).not.toContain(" .");
+	});
+
+	/** Between two words the space is correct — collapsing it would join them. */
+	it("keeps the space when the citation sits mid-sentence", async () => {
+		const model = stubModel("ANSWER: Fires [7] shaped the continent [1].");
+		const blocks = await collect(
+			createLlmComposer({ model }).compose({
+				query: "australian wildfire",
+				passages,
+				sources,
+			}),
+		);
+		const answer = blocks.find((b) => b.kind === "answer");
+		if (answer?.kind !== "answer") throw new Error("no answer");
+
+		expect(textOf(answer.spans)).toBe("Fires shaped the continent [1].");
+	});
+
+	/** A real citation is untouched by any of this. */
+	it("leaves a valid citation exactly where it was", async () => {
+		const model = stubModel("ANSWER: Fires shaped the continent [1].");
+		const blocks = await collect(
+			createLlmComposer({ model }).compose({
+				query: "australian wildfire",
+				passages,
+				sources,
+			}),
+		);
+		const answer = blocks.find((b) => b.kind === "answer");
+		if (answer?.kind !== "answer") throw new Error("no answer");
+
+		expect(textOf(answer.spans)).toBe("Fires shaped the continent [1].");
 	});
 });
