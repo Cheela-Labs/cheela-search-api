@@ -6,16 +6,17 @@ import type { DocumentStore } from "../infra/db/document-store";
 import type { QueryLog } from "../infra/db/query-log";
 import type { EgressClient } from "../infra/egress/client";
 import type { SearchRotation } from "../infra/upstream/rotation";
-import type { Candidate } from "../infra/upstream/types";
+import { type Candidate, interleaveAll } from "../infra/upstream/types";
 import type { Place, SearchEvent } from "../shared/events";
 import type { Composer } from "./compose/types";
 import { sourcesFrom, swatchFor } from "./compose/types";
 import {
 	type RetrievalOutcome,
 	type RetrievalStats,
+	type RetrievedPage,
 	retrievePages,
 } from "./retrieval/fetch";
-import { selectPassages } from "./retrieval/rank";
+import { type Passage, selectPassages } from "./retrieval/rank";
 import type { Classifier } from "./route/classifier";
 import { routeStructurally } from "./route/structural";
 
@@ -72,6 +73,28 @@ export type PipelineDeps = {
 	 * and a measurement detail has no business in it.
 	 */
 	onRetrieval?: (stats: RetrievalStats) => void;
+	/**
+	 * The passages that survived ranking, and the pages they were drawn from.
+	 * A measurement seam like `onRetrieval`, and like it, never affects
+	 * behaviour.
+	 *
+	 * Both halves, because one without the other cannot attribute a miss. Step
+	 * 5's acceptance criterion is "recall on the labeled set ... per-stage
+	 * rather than end-to-end", and per-stage here means a three-way split that
+	 * needs exactly these two arguments to compute:
+	 *
+	 * - a fact in neither the pages nor the passages → retrieval or extraction
+	 * - a fact in the pages but not the passages    → **the ranker dropped it**
+	 * - a fact in the passages but not the answer   → composition
+	 *
+	 * The middle one is the number that decides the embedding stage PLAN.md
+	 * deferred. If BM25 is losing nothing that was fetched, a semantic ranker
+	 * has no headroom to buy on the request path, and the deferral was right.
+	 */
+	onPassages?: (
+		kept: readonly Passage[],
+		available: readonly RetrievedPage[],
+	) => void;
 	/** Candidate URLs requested from the upstream provider. */
 	candidateLimit?: number;
 	/** Passages kept for composition. */
@@ -100,28 +123,17 @@ const DISCOVERY_EXTRA = 4;
  * than concatenating matters: the tail of a list is where the weak results live,
  * and appending would spend the extra budget on one list's dregs while the other
  * list's second-best result never got fetched.
+ *
+ * The mechanism lives in `interleaveAll` because the upstream fan-out needs the
+ * same policy for the same reason, and two implementations of a merge is how
+ * they quietly stop agreeing.
  */
 function interleave(
 	primary: readonly Candidate[],
 	secondary: readonly Candidate[],
 	limit: number,
 ): Candidate[] {
-	const merged: Candidate[] = [];
-	const seen = new Set<string>();
-
-	for (let index = 0; merged.length < limit; index += 1) {
-		const pair = [primary[index], secondary[index]];
-		if (pair[0] === undefined && pair[1] === undefined) break;
-
-		for (const candidate of pair) {
-			if (candidate === undefined || merged.length >= limit) continue;
-			if (seen.has(candidate.url)) continue;
-			seen.add(candidate.url);
-			merged.push(candidate);
-		}
-	}
-
-	return merged;
+	return interleaveAll([primary, secondary], limit);
 }
 
 /**
@@ -296,7 +308,8 @@ export async function* runPipeline(
 		const found = await searching;
 		if (aborted()) return;
 
-		const { intent } = await classifying;
+		const route = await classifying;
+		const { intent } = route;
 		yield { type: "intent", intent };
 
 		if (found.provider === null) {
@@ -344,9 +357,23 @@ export async function* runPipeline(
 			stage: { id: "read", state: "active", label: "Reading pages" },
 		};
 
+		/*
+		  `revalidate` is the router's freshness verdict reaching the cache.
+
+		  On the small class of queries whose answer moves within days — a current
+		  version, a price, a standing — a seven-day-old cached page is a wrong
+		  answer with a good response time, which is worse than a slow one. This
+		  forces the conditional request rather than skipping the cache, so an
+		  unchanged page still costs a 304 and no re-extraction. See
+		  `RetrieveOptions.revalidate`.
+		*/
 		const { outcomes, stats } = await retrievePages(
 			candidates.map((candidate) => candidate.url),
-			{ client: deps.egress, cache: deps.documents },
+			{
+				client: deps.egress,
+				cache: deps.documents,
+				revalidate: route.freshness === "high",
+			},
 		);
 		if (aborted()) return;
 		deps.onRetrieval?.(stats);
@@ -379,8 +406,13 @@ export async function* runPipeline(
 
 		const passages = await selectPassages(query, pages, {
 			limit: deps.passageLimit ?? DEFAULT_PASSAGES,
+			// Turns on the recency multiplier in `applySignals`. On a normal query
+			// it does nothing at all, which is the point: a date is only allowed to
+			// reorder results when the query said dates matter.
+			freshness: route.freshness,
 		});
 		if (aborted()) return;
+		deps.onPassages?.(passages, pages);
 
 		const sources = sourcesFrom(passages);
 

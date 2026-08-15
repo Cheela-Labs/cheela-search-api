@@ -58,6 +58,50 @@ export class UpstreamError extends Error {
 export const DEFAULT_LIMIT = 10;
 
 /**
+ * Merges ranked lists round-robin, keeping the first sight of each URL.
+ *
+ * **Round-robin rather than concatenation, and that is the entire merge
+ * policy.** Scores from different providers are not comparable — one vendor's
+ * 0.9 and another's 0.9 are answers to different questions, and no
+ * normalisation makes them one ranking. What *is* comparable is position: every
+ * provider's first result is that provider's best guess. So take one from each
+ * in turn and let the reranker sort out quality from the fetched text, which is
+ * the only place in this pipeline where a comparison is grounded in something
+ * we read ourselves.
+ *
+ * Concatenating instead would spend the whole budget on the first list's tail —
+ * where its weakest results live — before the second list's best result was
+ * ever fetched.
+ *
+ * Earlier lists win ties, so the caller orders them by how much it trusts them.
+ */
+export function interleaveAll(
+	lists: readonly (readonly Candidate[])[],
+	limit: number,
+): Candidate[] {
+	const merged: Candidate[] = [];
+	const seen = new Set<string>();
+
+	for (let index = 0; merged.length < limit; index += 1) {
+		let exhausted = true;
+
+		for (const list of lists) {
+			const candidate = list[index];
+			if (candidate === undefined) continue;
+			exhausted = false;
+			if (merged.length >= limit) break;
+			if (seen.has(candidate.url)) continue;
+			seen.add(candidate.url);
+			merged.push(candidate);
+		}
+
+		if (exhausted) break;
+	}
+
+	return merged;
+}
+
+/**
  * Drops anything that is not a usable http(s) URL, de-duplicates, and renumbers.
  *
  * Shared because every provider needs it and each one would otherwise get its

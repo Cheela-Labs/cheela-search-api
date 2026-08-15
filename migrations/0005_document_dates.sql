@@ -1,0 +1,20 @@
+-- When a page says it was published or last changed.
+--
+-- Added for the freshness weighting in `rank.ts`: on a query the router marks
+-- `fresh`, a passage from a page that proved it is recent outranks an equally
+-- relevant one that did not.
+--
+-- Stored rather than derived on read for the same reason `image` is. The
+-- extraction only happens on a cache *miss*, so a column-less version of this
+-- feature would rank correctly against a cold cache and lose the signal
+-- entirely as the cache warmed — PLAN.md calls that "the worst shape of bug,
+-- because it improves as the cache gets colder", and this is the third time
+-- that shape has come up on this table.
+--
+-- Nullable, and null is the ordinary case rather than a defect: most of the web
+-- declares no date at all. `applySignals` treats an absent date as "no evidence
+-- of freshness" and never as "old", so a page is only ever promoted for proving
+-- recency, never demoted for staying quiet about it. A NOT NULL default of
+-- `now()` would have been the natural-looking choice and would have made every
+-- uncached page the freshest thing in the result set.
+ALTER TABLE web.documents ADD COLUMN IF NOT EXISTS published_at timestamptz;

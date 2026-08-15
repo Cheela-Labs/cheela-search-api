@@ -1,0 +1,51 @@
+# The log-based metric behind step 7's dashboard.
+#
+# Applied with:
+#   gcloud logging metrics create search_api_cache_lookup \
+#     --config-from-file=monitoring/cache-lookup-metric.yaml
+#
+# One metric with two labels, rather than four metrics named after their
+# combinations. Labels are what makes `sum by outcome` and `filter to content`
+# the same object seen two ways — split into separate metrics they are four
+# unrelated series, and the ratio that matters cannot be expressed over them.
+#
+# `src/shared/metrics.ts` emits the line this reads. The field names below are
+# a contract with that file: rename one there and this keeps working while
+# quietly reporting nothing, which is the failure mode worth knowing about. The
+# service's own test suite asserts the field names for that reason.
+
+description: >-
+  Cache lookups in the search query plane, labelled by which cache and what it
+  decided. The Phase 0 gate is a content hit rate above 0.55, where a hit rate
+  is (hit + revalidated) / all. Counted from log lines because the service's
+  in-process counters reset on every scale-to-zero, so the cross-instance sum
+  is the only number that means anything.
+
+# `jsonPayload.metric` rather than a match on the message text: the
+# discriminator is a field precisely so that rewording the log cannot break the
+# dashboard.
+filter: |-
+  resource.type="cloud_run_revision"
+  resource.labels.service_name="search-api"
+  jsonPayload.metric="cache_lookup"
+
+metricDescriptor:
+  metricKind: DELTA
+  valueType: INT64
+  unit: "1"
+  displayName: Search cache lookups
+  labels:
+    - key: cache
+      valueType: STRING
+      description: content — a page fetch; query — an upstream provider call.
+    - key: outcome
+      valueType: STRING
+      description: >-
+        hit, miss, or revalidated. Revalidated is counted apart from hit
+        because a 304 still costs a round trip but no bandwidth, no extraction
+        and no re-chunking — folding it into hits overstates the saving and
+        folding it into misses understates it.
+
+labelExtractors:
+  cache: EXTRACT(jsonPayload.cache)
+  outcome: EXTRACT(jsonPayload.outcome)

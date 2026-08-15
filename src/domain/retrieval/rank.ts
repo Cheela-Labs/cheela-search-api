@@ -1,3 +1,4 @@
+import type { Freshness } from "../route/classifier";
 import { type Chunk, chunkText } from "./chunk";
 import type { RetrievedPage } from "./fetch";
 
@@ -39,6 +40,8 @@ export type Passage = Chunk & {
 	title: string | null;
 	/** The document's `og:image`, carried so the source list can show it. */
 	image: string | null;
+	/** The document's declared publish or modify date, for the freshness signal. */
+	publishedAt: string | null;
 	score: number;
 };
 
@@ -47,10 +50,133 @@ export type RankOptions = {
 	limit?: number;
 	/** Most passages any single document may contribute. */
 	perDocumentLimit?: number;
+	/**
+	 * The router's verdict on whether this query's answer moves. Only `high`
+	 * turns on the recency signal — see `applySignals`.
+	 */
+	freshness?: Freshness;
 };
 
 const DEFAULT_LIMIT = 12;
 const DEFAULT_PER_DOCUMENT = 3;
+
+/**
+ * How much a perfect title match multiplies a passage's score.
+ *
+ * **These are tie-breakers, not a retrieval mechanism, and the size is the
+ * statement.** At 0.5 a passage from a page whose title contains every query
+ * term is worth 1.5 of an otherwise identical passage: enough to reorder
+ * near-equals, not enough to lift a weakly relevant passage over a strongly
+ * relevant one. A weight large enough to do the latter would be doing
+ * retrieval, and the thing that should be doing retrieval is retrieval.
+ */
+const TITLE_WEIGHT = 0.5;
+
+/** The same, for a page that proved it is recent, on a query that wants recent. */
+const FRESHNESS_WEIGHT = 0.6;
+
+/**
+ * How fast the recency bonus decays, in days.
+ *
+ * Thirty, so a page from this week is clearly preferred, one from last quarter
+ * is barely distinguished, and one from last year is not boosted at all. The
+ * queries this fires on — a current version, a price, a standing — go wrong on
+ * a timescale of weeks, so the curve is shaped to that rather than to a news
+ * cycle.
+ */
+const FRESHNESS_HALF_LIFE_DAYS = 30;
+
+const DAY_MS = 24 * 60 * 60 * 1_000;
+
+export type SignalOptions = {
+	freshness?: Freshness;
+	/** Injectable so a test does not depend on the wall clock. */
+	now?: number;
+	titleWeight?: number;
+	freshnessWeight?: number;
+	halfLifeDays?: number;
+};
+
+/**
+ * Re-scores ranked passages on signals that are about the *document*, not about
+ * how well its text matches the query.
+ *
+ * Kept out of `Ranker` on purpose. A ranker answers one question — how well
+ * does this passage match this query — and every future implementation of that
+ * seam, semantic or otherwise, would have to reimplement title and recency
+ * handling if they lived inside it. They are the same two multipliers whatever
+ * decided the base score.
+ *
+ * ## Multiplicative, because BM25 scores have no fixed scale
+ *
+ * A BM25 score depends on the query's IDF profile, so the same additive bonus
+ * is decisive on one query and invisible on the next. A multiplier means
+ * "worth half again as much" regardless of the magnitudes involved, which is a
+ * statement somebody can reason about.
+ *
+ * ## A zero score stays zero, deliberately
+ *
+ * A passage containing none of the query's terms scores 0, and 0 times any
+ * multiplier is 0. So a recent date cannot float a passage that is not about
+ * the query — which is exactly the failure people mean when they say freshness
+ * ranking made results worse.
+ *
+ * ## Absence of a date is never a penalty
+ *
+ * Most of the web declares no date. Recency can only promote a page that proved
+ * it is recent; a page that said nothing ranks exactly as it would have without
+ * this stage. Otherwise the signal would mostly measure whether a CMS emits
+ * Open Graph tags.
+ */
+export function applySignals(
+	passages: readonly Passage[],
+	query: string,
+	options: SignalOptions = {},
+): Passage[] {
+	const titleWeight = options.titleWeight ?? TITLE_WEIGHT;
+	const freshnessWeight = options.freshnessWeight ?? FRESHNESS_WEIGHT;
+	const halfLife = options.halfLifeDays ?? FRESHNESS_HALF_LIFE_DAYS;
+	const now = options.now ?? Date.now();
+	const wantsFresh = options.freshness === "high";
+
+	const queryTerms = [...new Set(tokenise(query))];
+	if (queryTerms.length === 0) return [...passages];
+
+	// One title match per document, not per passage — the title is a property of
+	// the page, and recomputing it for each of its passages is the same answer
+	// arrived at three times.
+	const titleMatchByDocument = new Map<number, number>();
+
+	const scored = passages.map((passage) => {
+		let titleMatch = titleMatchByDocument.get(passage.documentIndex);
+		if (titleMatch === undefined) {
+			const titleTerms = new Set(tokenise(passage.title ?? ""));
+			titleMatch =
+				titleTerms.size === 0
+					? 0
+					: queryTerms.filter((term) => titleTerms.has(term)).length /
+						queryTerms.length;
+			titleMatchByDocument.set(passage.documentIndex, titleMatch);
+		}
+
+		let multiplier = 1 + titleWeight * titleMatch;
+
+		if (wantsFresh && passage.publishedAt) {
+			const published = Date.parse(passage.publishedAt);
+			if (!Number.isNaN(published)) {
+				// Clamped at zero so a page dated slightly in the future — clock skew,
+				// a scheduled post — is treated as "now" rather than as extra fresh.
+				const ageDays = Math.max(0, (now - published) / DAY_MS);
+				const recency = Math.exp(-ageDays / halfLife);
+				multiplier *= 1 + freshnessWeight * recency;
+			}
+		}
+
+		return { ...passage, score: passage.score * multiplier };
+	});
+
+	return scored.sort((a, b) => b.score - a.score);
+}
 
 /** BM25's usual constants. Tuned by the literature, not by us, and not yet worth it. */
 const K1 = 1.2;
@@ -163,6 +289,7 @@ export async function selectPassages(
 				domain: page.domain,
 				title: page.extraction.title,
 				image: page.extraction.image,
+				publishedAt: page.extraction.publishedAt,
 				score: 0,
 			});
 		}
@@ -173,7 +300,20 @@ export async function selectPassages(
 	// Ranked deeper than the limit, because the cap below removes passages and
 	// the shortfall has to be filled from somewhere. Without the headroom, a
 	// single dominant document leaves the answer short of sources.
-	const ranked = await ranker.rank(query, pool, limit * 4);
+	const shortlist = await ranker.rank(query, pool, limit * 4);
+
+	/*
+	  Document signals apply *within* the lexical shortlist, never to the whole
+	  pool, and that boundary is deliberate. A passage BM25 placed outside the
+	  top forty-eight is not one a matching title should rescue — signals break
+	  ties among passages already judged relevant, and letting them reach further
+	  makes the title tag a retrieval mechanism. It also keeps the seam's cost
+	  contract intact: a future semantic ranker is still asked for a shortlist,
+	  not for a score on every passage.
+	*/
+	const ranked = applySignals(shortlist, query, {
+		...(options.freshness ? { freshness: options.freshness } : {}),
+	});
 
 	const kept: Passage[] = [];
 	const perDocumentCount = new Map<number, number>();

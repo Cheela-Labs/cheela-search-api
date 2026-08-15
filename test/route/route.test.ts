@@ -122,6 +122,7 @@ describe("classifier · the retrieval rewrite", () => {
 		).toEqual({
 			intent: "discovery",
 			retrievalQuery: "buy nike jordan sneakers online store",
+			freshness: "normal",
 		});
 	});
 
@@ -142,6 +143,7 @@ describe("classifier · the retrieval rewrite", () => {
 		expect(await route("discovery")).toEqual({
 			intent: "discovery",
 			retrievalQuery: null,
+			freshness: "normal",
 		});
 		expect((await route("discovery |   ")).retrievalQuery).toBeNull();
 	});
@@ -156,5 +158,76 @@ describe("classifier · the retrieval rewrite", () => {
 		expect(
 			(await route("navigational | buy things")).retrievalQuery,
 		).toBeNull();
+	});
+});
+
+/**
+ * Freshness — the one signal that decides whether a seven-day-old cached page
+ * is served or re-checked.
+ *
+ * The parsing matters more than it looks. The prompt asks for three
+ * pipe-delimited fields and models reliably produce two of them, sometimes in
+ * the other order. Reading by position gives an informational query a retrieval
+ * query of `"fresh"` — which the pipeline would then *search for*, and which
+ * looks like a bad index rather than a bad parse.
+ */
+describe("classifier · freshness", () => {
+	const model = (reply: string): TextModel => ({
+		name: "stub",
+		async complete() {
+			return reply;
+		},
+	});
+
+	const route = (reply: string) => createClassifier(model(reply))("q");
+
+	it("is normal when the model says nothing about it", async () => {
+		expect((await route("informational")).freshness).toBe("normal");
+		expect((await route("discovery | buy shoes")).freshness).toBe("normal");
+	});
+
+	it("reads the marker on a query with no rewrite", async () => {
+		expect((await route("informational | fresh")).freshness).toBe("high");
+	});
+
+	it("does not mistake the marker for a retrieval query", async () => {
+		// The failure this guards: `"fresh"` becoming the search string.
+		const informational = await route("informational | fresh");
+		expect(informational.retrievalQuery).toBeNull();
+
+		const discovery = await route("discovery | fresh");
+		expect(discovery.freshness).toBe("high");
+		expect(discovery.retrievalQuery).toBeNull();
+	});
+
+	it("takes both a rewrite and the marker, in either order", async () => {
+		const trailing = await route("discovery | book flights to goa | fresh");
+		expect(trailing.freshness).toBe("high");
+		expect(trailing.retrievalQuery).toBe("book flights to goa");
+
+		// Models do reverse these. The rewrite must survive it rather than
+		// becoming "fresh book flights to goa".
+		const leading = await route("discovery | fresh | book flights to goa");
+		expect(leading.freshness).toBe("high");
+		expect(leading.retrievalQuery).toBe("book flights to goa");
+	});
+
+	it("resolves downward when the model fails", async () => {
+		const broken: TextModel = {
+			name: "broken",
+			async complete() {
+				throw new Error("upstream down");
+			},
+		};
+		// Ambiguity resolves to the cheap wrong answer, not the expensive one: a
+		// stale page beats re-fetching every page on every query.
+		expect((await createClassifier(broken)("q")).freshness).toBe("normal");
+	});
+
+	it("does not read the marker from the intent field itself", async () => {
+		// "fresh" appearing where the label goes is not a freshness verdict — it
+		// is a model that ignored the format, and the intent parse already
+		// handles that by falling back to informational.
+		expect((await route("fresh")).freshness).toBe("normal");
 	});
 });

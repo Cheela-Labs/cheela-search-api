@@ -18,6 +18,18 @@ export default defineConfig({
 			// One provider, so the config refinement is satisfied. Provider tests
 			// build their own instances against fixture servers and never read this.
 			TAVILY_API_KEY: "tvly-test-not-a-real-key",
+
+			// No free specialists in the suite, and this line is load-bearing.
+			//
+			// Wikipedia needs no credential, so unlike every paid vendor it is built
+			// whenever it is listed — which means the process-wide `upstream` would
+			// reach the real en.wikipedia.org from any test that uses the default
+			// dependencies. A suite that quietly makes outbound calls is slow, fails
+			// on a plane, and reports somebody else's incident as our regression.
+			//
+			// Specialist behaviour is covered in `test/upstream/providers.test.ts`
+			// against fixture servers, which is where a provider's parsing belongs.
+			SEARCH_SUPPLEMENTS: "",
 		},
 
 		include: ["test/**/*.test.ts"],

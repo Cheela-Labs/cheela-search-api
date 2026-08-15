@@ -1,7 +1,11 @@
 import { readFile } from "node:fs/promises";
 import { composer } from "../src/domain/compose";
 import { runPipeline } from "../src/domain/pipeline";
-import type { RetrievalStats } from "../src/domain/retrieval/fetch";
+import type {
+	RetrievalStats,
+	RetrievedPage,
+} from "../src/domain/retrieval/fetch";
+import type { Passage } from "../src/domain/retrieval/rank";
 import { classifier } from "../src/domain/route";
 import { PostgresDocumentStore } from "../src/infra/db/document-store";
 import { pool } from "../src/infra/db/pool";
@@ -44,6 +48,16 @@ type Label = {
 	intent?: Intent;
 	expectDomains?: string[];
 	mustMention?: string[];
+	/**
+	 * Facts a correct answer has to have *found*, checked against the passages
+	 * rather than against the prose.
+	 *
+	 * The label step 5 needs, and deliberately not the same field as
+	 * `mustMention`: one asks whether the answer said a thing, this one asks
+	 * whether retrieval ever put the thing in front of the composer. A query
+	 * labelled with both splits a failure into the stage that caused it.
+	 */
+	mustRetrieve?: string[];
 	expectEmpty?: boolean;
 };
 
@@ -57,6 +71,9 @@ type Result = {
 	sources: Source[];
 	blocks: AnswerBlock[];
 	retrieval: RetrievalStats | null;
+	/** What survived ranking, and what it was ranked from. See `attribute`. */
+	passages: Passage[];
+	pages: RetrievedPage[];
 	answerText: string;
 	judgement?: Judgement;
 };
@@ -141,6 +158,8 @@ async function runOne(label: Label): Promise<Result> {
 	const blocks: AnswerBlock[] = [];
 	let intent: Intent | null = null;
 	let retrieval: RetrievalStats | null = null;
+	let passages: Passage[] = [];
+	let pages: RetrievedPage[] = [];
 	let error: string | undefined;
 
 	const deps = {
@@ -153,6 +172,13 @@ async function runOne(label: Label): Promise<Result> {
 		// the permanent record would poison the corpus PLAN.md keeps it for.
 		onRetrieval: (stats: RetrievalStats) => {
 			retrieval = stats;
+		},
+		onPassages: (
+			kept: readonly Passage[],
+			available: readonly RetrievedPage[],
+		) => {
+			passages = [...kept];
+			pages = [...available];
 		},
 	};
 
@@ -177,6 +203,8 @@ async function runOne(label: Label): Promise<Result> {
 		sources,
 		blocks,
 		retrieval,
+		passages,
+		pages,
 		answerText: textOf(blocks),
 	};
 }
@@ -312,6 +340,121 @@ function mentionRate(results: Result[]): Metric {
 }
 
 /**
+ * Where a fact that a correct answer needed was lost.
+ *
+ * This is step 5's acceptance criterion — *"recall on the labeled set clears
+ * the bar, and the numbers are per-stage rather than end-to-end"* — made
+ * computable. A single recall number says the answer was missing something; it
+ * cannot say which stage dropped it, and the four stages have nothing in
+ * common but the symptom.
+ *
+ * Checked at three points, so each fact lands in exactly one bucket:
+ *
+ * - `answered`    — it made it all the way through.
+ * - `composition` — a passage carried it and the answer did not use it. The
+ *                   retrieval stages did their job.
+ * - `ranking`     — a page carried it and no surviving passage did. **The
+ *                   ranker or the chunker dropped it**, and this is the only
+ *                   bucket a better ranker can move.
+ * - `retrieval`   — nothing we read carried it at all. Upstream did not return
+ *                   the page, or extraction lost it.
+ *
+ * Substring matching, lowercased, for the same reason `mustMention` uses it:
+ * it costs no model call, and the failure it catches — the fact simply is not
+ * there — is the one worth catching cheaply.
+ */
+type LossStage = "answered" | "composition" | "ranking" | "retrieval";
+
+const LOSS_STAGES: LossStage[] = [
+	"answered",
+	"composition",
+	"ranking",
+	"retrieval",
+];
+
+function attribute(result: Result): LossStage[] {
+	const facts = result.label.mustRetrieve ?? [];
+	if (facts.length === 0) return [];
+
+	const pageText = result.pages
+		.map((page) => page.extraction.text)
+		.join("\n")
+		.toLowerCase();
+	const passageText = result.passages
+		.map((passage) => passage.text)
+		.join("\n")
+		.toLowerCase();
+	const answer = result.answerText.toLowerCase();
+
+	return facts.map((fact) => {
+		const needle = fact.toLowerCase();
+		if (answer.includes(needle)) return "answered";
+		if (passageText.includes(needle)) return "composition";
+		if (pageText.includes(needle)) return "ranking";
+		return "retrieval";
+	});
+}
+
+/**
+ * Step 5's headline: of the facts a correct answer needed, how many did
+ * ranking actually put in front of the composer.
+ *
+ * Macro-averaged for the same reason `domainRecall` is — pooled, one query
+ * labelled with eight facts would outweigh four labelled with one, and the
+ * metric would quietly become a measure of whichever query somebody labelled
+ * most thoroughly.
+ */
+function passageRecall(results: Result[]): Metric {
+	const labelled = results.filter((r) => (r.label.mustRetrieve ?? []).length);
+	if (labelled.length === 0) return ratio(0, 0);
+
+	let total = 0;
+	for (const result of labelled) {
+		const stages = attribute(result);
+		const kept = stages.filter(
+			(stage) => stage === "answered" || stage === "composition",
+		).length;
+		total += kept / stages.length;
+	}
+	return ratio(total, labelled.length);
+}
+
+/**
+ * Of the facts we actually fetched, how many the ranker then threw away.
+ *
+ * **This is the number that decides the embedding stage PLAN.md deferred**, and
+ * it is the reason step 5 can be accepted or rejected on evidence rather than
+ * on taste. The plan's position is that BM25 over "a hundred passages from
+ * pages an upstream engine already judged relevant" is a strong baseline, and
+ * that a semantic ranker "earns its model call per query on the request path or
+ * it does not, and the eval harness is what says which."
+ *
+ * This is that test. A loss near zero means every fact that was fetched
+ * survived into the context, so there is no headroom for a better ranker to
+ * buy — a semantic reranker would be paying a per-query model call for
+ * passages BM25 was already keeping. A large loss is the opposite finding and
+ * the mandate to build it.
+ *
+ * Pooled rather than macro-averaged, and unlike `passageRecall` that is the
+ * right choice here: this is a diagnostic about the ranker, not a quality score
+ * per query, and every fact that reached the pool is one independent
+ * observation of what the ranker did with it.
+ */
+function rankerLoss(results: Result[]): Metric {
+	let available = 0;
+	let lost = 0;
+	for (const result of results) {
+		for (const stage of attribute(result)) {
+			// Facts never retrieved are not the ranker's to lose.
+			if (stage === "retrieval") continue;
+			available += 1;
+			if (stage === "ranking") lost += 1;
+		}
+	}
+	return ratio(lost, available, "facts reaching the pool");
+}
+
+/**
  * Did the queries labelled unanswerable stay quiet.
  *
  * The one metric where a *high* answer rate is the failure. A search engine
@@ -432,6 +575,8 @@ async function main(): Promise<void> {
 	console.log(row("extraction rate", extractionRate(results)));
 	console.log(row("  ↳ addressable", addressableExtraction(results), 0.9));
 	console.log(row("domain recall", domainRecall(results)));
+	console.log(row("passage recall", passageRecall(results)));
+	console.log(row("  ↳ lost by ranking", rankerLoss(results)));
 	console.log(row("citation validity", citationValidity(results), 1));
 	console.log(row("must-mention", mentionRate(results)));
 	console.log(row("restraint on empty", restraint(results)));
@@ -455,6 +600,32 @@ async function main(): Promise<void> {
 			const share = ((count / total) * 100).toFixed(0).padStart(3);
 			console.log(
 				`    ${reason.padEnd(22)} ${String(count).padStart(3)}  ${share}%`,
+			);
+		}
+	}
+
+	/*
+	  Step 5's criterion, in the form that makes it actionable: not how many
+	  facts were missing, but which stage lost each one. A recall number alone
+	  sends you to improve the ranker when the page was never fetched.
+	*/
+	const attribution = results.flatMap(attribute);
+	if (attribution.length > 0) {
+		console.log(
+			"\n── Where a needed fact was lost ───────────────────────────",
+		);
+		const owner: Record<LossStage, string> = {
+			answered: "",
+			composition: "composer had it, did not use it",
+			ranking: "ranker or chunker dropped it",
+			retrieval: "never fetched, or extraction lost it",
+		};
+		for (const stage of LOSS_STAGES) {
+			const count = attribution.filter((s) => s === stage).length;
+			if (count === 0) continue;
+			const share = ((count / attribution.length) * 100).toFixed(0).padStart(3);
+			console.log(
+				`    ${stage.padEnd(14)} ${String(count).padStart(3)}  ${share}%  ${owner[stage]}`,
 			);
 		}
 	}

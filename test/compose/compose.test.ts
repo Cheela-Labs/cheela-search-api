@@ -27,6 +27,7 @@ const passage = (
 ): Passage => ({
 	ordinal: 0,
 	text,
+	publishedAt: null,
 	contentHash: `hash-${documentIndex}`,
 	documentIndex,
 	url: `https://${domain}/page`,

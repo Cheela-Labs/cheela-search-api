@@ -49,6 +49,7 @@ type Row = {
 	http_status: number;
 	etag: string | null;
 	expires_at: Date | null;
+	published_at: Date | null;
 };
 
 /**
@@ -81,7 +82,7 @@ export class PostgresDocumentStore implements DocumentStore {
 			// have the latter, and after one we prefer the former.
 			const { rows } = await this.pool.query<Row>(
 				`SELECT url, canonical_url, domain, title, image, extracted_text,
-				        content_hash, http_status, etag, expires_at
+				        content_hash, http_status, etag, expires_at, published_at
 				   FROM web.documents
 				  WHERE canonical_url = $1 OR url = $1
 				  LIMIT 1`,
@@ -108,6 +109,7 @@ export class PostgresDocumentStore implements DocumentStore {
 					canonicalUrl: row.canonical_url,
 					image: row.image,
 					text: row.extracted_text,
+					publishedAt: row.published_at?.toISOString() ?? null,
 					contentHash: row.content_hash,
 				},
 			};
@@ -122,8 +124,9 @@ export class PostgresDocumentStore implements DocumentStore {
 			await this.pool.query(
 				`INSERT INTO web.documents
 				        (url, canonical_url, domain, title, image, extracted_text,
-				         content_hash, http_status, etag, fetched_at, expires_at)
-				 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now(), now() + ($10::bigint * interval '1 millisecond'))
+				         content_hash, http_status, etag, published_at,
+				         fetched_at, expires_at)
+				 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $11, now(), now() + ($10::bigint * interval '1 millisecond'))
 				 ON CONFLICT (canonical_url) DO UPDATE
 				    SET url            = EXCLUDED.url,
 				        domain         = EXCLUDED.domain,
@@ -133,6 +136,7 @@ export class PostgresDocumentStore implements DocumentStore {
 				        content_hash   = EXCLUDED.content_hash,
 				        http_status    = EXCLUDED.http_status,
 				        etag           = EXCLUDED.etag,
+				        published_at   = EXCLUDED.published_at,
 				        fetched_at     = now(),
 				        expires_at     = EXCLUDED.expires_at`,
 				[
@@ -146,6 +150,7 @@ export class PostgresDocumentStore implements DocumentStore {
 					input.status,
 					input.etag,
 					this.ttlMs,
+					input.extraction.publishedAt,
 				],
 			);
 		} catch (error) {

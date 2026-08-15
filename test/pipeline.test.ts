@@ -290,6 +290,7 @@ describe("pipeline · discovery", () => {
 	const discovering = (retrievalQuery: string | null) => async () => ({
 		intent: "discovery" as const,
 		retrievalQuery,
+		freshness: "normal" as const,
 	});
 
 	it("shows a shop it could not read, using the head it could", async () => {
@@ -366,6 +367,7 @@ describe("pipeline · discovery", () => {
 			classifier: async () => ({
 				intent: "informational" as const,
 				retrievalQuery: null,
+				freshness: "normal" as const,
 			}),
 		});
 

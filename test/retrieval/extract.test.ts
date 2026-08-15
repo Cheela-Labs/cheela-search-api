@@ -207,3 +207,101 @@ describe("extract · the page's own image", () => {
 		expect(imageOf("<title>T</title>")).toBeNull();
 	});
 });
+
+/**
+ * The page's own date, for the freshness signal in `rank.ts`.
+ *
+ * Everything here is about not lying to the ranker. A date that is wrong is
+ * worse than a date that is absent, because absence is handled — `applySignals`
+ * never penalises a page for declaring nothing — while a wrong date actively
+ * reorders results.
+ */
+describe("extract · publishedAt", () => {
+	const page = (head: string) =>
+		extract(
+			`<!doctype html><html><head><title>T</title>${head}</head>
+			 <body><article>${"A sentence with enough substance to extract. ".repeat(20)}</article></body></html>`,
+			"https://example.com/a",
+		);
+
+	it("is null when the page declares nothing", () => {
+		const result = page("");
+		expect(result.ok).toBe(true);
+		if (!result.ok) return;
+		// Null, not "now" and not the epoch. Most of the web is this case.
+		expect(result.extraction.publishedAt).toBeNull();
+	});
+
+	it("reads an article published time", () => {
+		const result = page(
+			'<meta property="article:published_time" content="2026-03-04T10:00:00Z">',
+		);
+		expect(result.ok).toBe(true);
+		if (!result.ok) return;
+		expect(result.extraction.publishedAt).toBe("2026-03-04T10:00:00.000Z");
+	});
+
+	/**
+	 * The question the ranker asks is "how current is this content", not "when
+	 * did this URL first exist". A release-notes page written in 2009 and updated
+	 * last week is current, and ranking it as sixteen years old is the exact
+	 * failure the signal exists to prevent.
+	 */
+	it("prefers the modified time over the published time", () => {
+		const result = page(
+			'<meta property="article:published_time" content="2009-01-01T00:00:00Z">' +
+				'<meta property="article:modified_time" content="2026-07-01T00:00:00Z">',
+		);
+		expect(result.ok).toBe(true);
+		if (!result.ok) return;
+		expect(result.extraction.publishedAt).toBe("2026-07-01T00:00:00.000Z");
+	});
+
+	/**
+	 * Placeholder dates are the trap. A great many pages emit `0001-01-01` or a
+	 * Unix zero for "unset", and accepting one hands the ranker a document that
+	 * is confidently ancient rather than one whose date is unknown.
+	 */
+	it("discards a placeholder date rather than believing it", () => {
+		for (const value of ["0001-01-01T00:00:00Z", "1970-01-01T00:00:00Z"]) {
+			const result = page(
+				`<meta property="article:published_time" content="${value}">`,
+			);
+			expect(result.ok).toBe(true);
+			if (!result.ok) return;
+			expect(result.extraction.publishedAt).toBeNull();
+		}
+	});
+
+	it("discards a date far in the future", () => {
+		const result = page(
+			'<meta property="article:published_time" content="2099-01-01T00:00:00Z">',
+		);
+		expect(result.ok).toBe(true);
+		if (!result.ok) return;
+		expect(result.extraction.publishedAt).toBeNull();
+	});
+
+	it("ignores an unparseable value instead of failing the extraction", () => {
+		const result = page(
+			'<meta property="article:published_time" content="last Tuesday-ish">',
+		);
+		// The page still extracts. A bad date is the page's problem and never a
+		// reason to drop content we could read.
+		expect(result.ok).toBe(true);
+		if (!result.ok) return;
+		expect(result.extraction.publishedAt).toBeNull();
+	});
+
+	it("falls back to a time element when no meta tag carries a date", () => {
+		const result = extract(
+			`<!doctype html><html><head><title>T</title></head>
+			 <body><article><time datetime="2026-05-05">May</time>
+			 ${"A sentence with enough substance to extract. ".repeat(20)}</article></body></html>`,
+			"https://example.com/a",
+		);
+		expect(result.ok).toBe(true);
+		if (!result.ok) return;
+		expect(result.extraction.publishedAt).toBe("2026-05-05T00:00:00.000Z");
+	});
+});

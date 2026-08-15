@@ -1,6 +1,6 @@
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { retrievePages } from "../src/domain/retrieval/fetch";
 import type {
@@ -12,6 +12,7 @@ import type { CachedCandidate, QueryCache } from "../src/infra/db/query-cache";
 import { createEgressClient } from "../src/infra/egress/client";
 import { withQueryCache } from "../src/infra/upstream/cached-rotation";
 import type { RotationResult } from "../src/infra/upstream/rotation";
+import { logger } from "../src/shared/logger";
 import {
 	cacheStats,
 	recordHit,
@@ -91,6 +92,7 @@ function documentFor(url: string, overrides: Partial<CachedDocument> = {}) {
 			canonicalUrl: url,
 			image: "https://example.com/card.png",
 			text: "An extracted sentence about the subject. ".repeat(40),
+			publishedAt: null,
 			contentHash: "hash-1",
 		},
 		...overrides,
@@ -410,5 +412,173 @@ describe("cache stats", () => {
 		expect(stats().hitRate).toBeCloseTo(0.5);
 		expect(stats().revalidated).toBe(1);
 		expect(stats().hits).toBe(1);
+	});
+});
+
+/**
+ * The line `monitoring/cache-lookup-metric.yaml` reads.
+ *
+ * This is a wire contract that TypeScript cannot check, because the other end
+ * is a YAML file in another system: the metric's `labelExtractors` name
+ * `jsonPayload.cache` and `jsonPayload.outcome`, and its filter matches
+ * `jsonPayload.metric="cache_lookup"`. Rename any of the three here and
+ * nothing fails — the metric simply matches nothing and the dashboard reports
+ * a confident, empty zero, which is the worst way for a gate to break.
+ *
+ * The same argument `test/app.test.ts` makes for asserting the event encoding
+ * rather than the types, applied to the one field name that leaves the process.
+ *
+ * Asserted on the object handed to the logger rather than on stdout: pino
+ * writes to file descriptor 1 directly, so intercepting `process.stdout.write`
+ * would capture nothing and pass for the wrong reason.
+ */
+describe("the cache-lookup log line", () => {
+	function fieldsFrom(run: () => void): Record<string, unknown> {
+		const spy = vi.spyOn(logger, "info").mockImplementation(() => undefined);
+		try {
+			run();
+			const call = spy.mock.calls.at(-1);
+			return (call?.[0] ?? {}) as Record<string, unknown>;
+		} finally {
+			spy.mockRestore();
+		}
+	}
+
+	it("carries the discriminator and both labels the metric extracts", () => {
+		expect(fieldsFrom(() => recordHit("content"))).toMatchObject({
+			metric: "cache_lookup",
+			cache: "content",
+			outcome: "hit",
+		});
+	});
+
+	it("spells each outcome the way the dashboard groups them", () => {
+		expect(fieldsFrom(() => recordMiss("query")).outcome).toBe("miss");
+		expect(fieldsFrom(() => recordRevalidated("content")).outcome).toBe(
+			"revalidated",
+		);
+		expect(fieldsFrom(() => recordMiss("query")).cache).toBe("query");
+	});
+
+	/**
+	 * The privacy property, asserted rather than trusted.
+	 *
+	 * `/health` reports these counts *outside* the token gate, justified on the
+	 * grounds that they "name no query, no URL and no caller, so there is
+	 * nothing here to protect". Emitting the same decisions to a log is only
+	 * safe while that stays true, and the tempting next commit is the one that
+	 * adds the URL "just for debugging" — at which point every fetched address
+	 * is in Cloud Logging forever, next to a query log PLAN.md deliberately
+	 * keeps unlinked from any identity.
+	 *
+	 * An exact key set, so adding a field is a decision somebody has to make
+	 * here on purpose.
+	 */
+	it("names no query, no url and no caller", () => {
+		expect(Object.keys(fieldsFrom(() => recordHit("content"))).sort()).toEqual([
+			"cache",
+			"metric",
+			"outcome",
+		]);
+	});
+});
+
+/**
+ * Forced revalidation — the router's freshness verdict reaching the cache.
+ *
+ * The whole design claim is that this is *revalidation* and not a bypass. A
+ * bypass would re-download and re-extract every page on every volatile query;
+ * forcing the conditional request means an unchanged page answers 304, which
+ * costs a round trip and no body, no extraction and no re-chunking.
+ */
+describe("content cache · revalidate", () => {
+	it("re-checks a page that is still fresh, instead of serving it blind", async () => {
+		let requests = 0;
+		let seenIfNoneMatch: string | undefined;
+		const port = await serve((req, res) => {
+			requests += 1;
+			seenIfNoneMatch = req.headers["if-none-match"] as string | undefined;
+			res.writeHead(304).end();
+		});
+		const url = `http://127.0.0.1:${port}/a`;
+		// Fresh: without `revalidate` this is served with no request at all.
+		const cache = fakeStore(documentFor(url, { etag: '"v1"' }));
+
+		const { outcomes } = await retrievePages([url], {
+			client: client(),
+			cache: cache.store,
+			revalidate: true,
+		});
+
+		expect(requests).toBe(1);
+		expect(seenIfNoneMatch).toBe('"v1"');
+		expect(outcomes[0].ok).toBe(true);
+		// The point of the design: unchanged means we still serve what we held,
+		// and it is counted as a revalidation rather than as a hit or a miss.
+		expect(cacheStats().content.revalidated).toBe(1);
+		expect(cacheStats().content.hits).toBe(0);
+		expect(cache.writes).toHaveLength(0);
+	});
+
+	it("serves the fresh copy without a request when revalidate is off", async () => {
+		let requests = 0;
+		const port = await serve((_req, res) => {
+			requests += 1;
+			res.writeHead(200, { "content-type": "text/html" }).end(PAGE);
+		});
+		const url = `http://127.0.0.1:${port}/a`;
+		const cache = fakeStore(documentFor(url, { etag: '"v1"' }));
+
+		await retrievePages([url], { client: client(), cache: cache.store });
+
+		expect(requests).toBe(0);
+		expect(cacheStats().content.hits).toBe(1);
+	});
+
+	it("takes the new body when the page actually changed", async () => {
+		const port = await serve((_req, res) =>
+			res
+				.writeHead(200, { "content-type": "text/html", etag: '"v2"' })
+				.end(PAGE),
+		);
+		const url = `http://127.0.0.1:${port}/a`;
+		const cache = fakeStore(documentFor(url, { etag: '"v1"' }));
+
+		const { outcomes } = await retrievePages([url], {
+			client: client(),
+			cache: cache.store,
+			revalidate: true,
+		});
+
+		expect(outcomes[0].ok).toBe(true);
+		// Rewritten, with the new etag — this is the case worth paying for.
+		expect(cache.writes).toHaveLength(1);
+		expect(cache.writes[0].etag).toBe('"v2"');
+		expect(cacheStats().content.misses).toBe(1);
+	});
+
+	/**
+	 * A cached copy with no etag has nothing to make the request conditional
+	 * with. Degrading to an ordinary fetch is correct — no etag means the origin
+	 * gave us no way to ask cheaply — and is asserted so that it stays a
+	 * deliberate degradation rather than becoming a silent 200-on-every-query.
+	 */
+	it("falls back to a full fetch when there is no etag to ask with", async () => {
+		let seenIfNoneMatch: string | undefined = "unset";
+		const port = await serve((req, res) => {
+			seenIfNoneMatch = req.headers["if-none-match"] as string | undefined;
+			res.writeHead(200, { "content-type": "text/html" }).end(PAGE);
+		});
+		const url = `http://127.0.0.1:${port}/a`;
+		const cache = fakeStore(documentFor(url, { etag: null }));
+
+		const { outcomes } = await retrievePages([url], {
+			client: client(),
+			cache: cache.store,
+			revalidate: true,
+		});
+
+		expect(seenIfNoneMatch).toBeUndefined();
+		expect(outcomes[0].ok).toBe(true);
 	});
 });

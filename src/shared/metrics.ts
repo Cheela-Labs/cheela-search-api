@@ -1,23 +1,74 @@
+import { logger } from "./logger";
+
 /**
- * Cache counters, in process.
+ * Cache counters, in process — and one log line per decision, for the
+ * collector.
  *
  * PLAN.md gates step 7 on "hit rate is on a dashboard, from the first day it
  * can be", and argues why: **cache hit rate decides unit economics outright at
  * MVP**, because the dominant cost per query is upstream calls and page
  * fetches. A cache with no hit rate is a cache nobody can defend.
  *
- * In process, and reset when the instance is replaced. That is a real
- * limitation and it is the right first step anyway: the alternative is a
- * counters table written on the request path, which buys durability by adding
- * a write to the very path the cache exists to make cheaper. Cloud Run scrapes
- * this per instance; the sum across instances is the number that matters and
- * that is the collector's job, not this file's.
+ * ## Why the process reports decisions instead of totals
+ *
+ * The counters below are per instance and reset when the container is
+ * replaced, which is what stopped step 7 being accepted: a scale-to-zero
+ * service spends most of its life having just forgotten everything it knew, so
+ * `/health` can never be the dashboard number. Each decision is therefore also
+ * emitted as a structured line and Cloud Monitoring counts them. That is this
+ * file's own stated position — "the sum across instances is the number that
+ * matters and that is the collector's job, not this file's" — carried one step
+ * further, because the *counting* is the collector's job too.
+ *
+ * Three alternatives were considered and are worth recording:
+ *
+ * - **A periodic flush of the totals.** Cheaper in log volume and wrong on
+ *   this host: Cloud Run throttles CPU to near zero between requests, so a
+ *   timer is not guaranteed to fire and the last interval before an instance
+ *   dies is lost. Inside a request is the only moment CPU is certain.
+ * - **A per-query summary line.** Eight times less volume, and it needs a
+ *   request-scoped counter threaded through both the fetch stage and the
+ *   upstream rotation, or an AsyncLocalStorage. Both are real changes to code
+ *   that is correct now, to buy a ratio that comes out identical either way.
+ * - **Writing counters to Postgres.** Buys durability by adding a write to the
+ *   exact path the cache exists to make cheaper.
+ *
+ * What this does cost is a line per cache lookup — call it ten per query, a
+ * couple of hundred bytes each. At PLAN.md's own 100k queries/month break-even
+ * that is comfortably inside Cloud Logging's free allowance, and if it ever
+ * stops being, the per-query summary above is the upgrade.
+ *
+ * ## What is deliberately not in the line
+ *
+ * No URL, no query, no caller. `/health` already reports these counts outside
+ * the token gate on the grounds that they "name no query, no URL and no
+ * caller, so there is nothing here to protect" — and that stays true only if
+ * it stays true here. This function is the right home for the emission partly
+ * *because* it has none of those things in scope to leak: PLAN.md keeps the
+ * query log unlinked from any identity, and a cache metric is not the place to
+ * quietly reintroduce one.
  *
  * Deliberately not a histogram or a timer. The question at this stage is "what
  * fraction of pages did we avoid fetching", which is two integers.
  */
 
 export type CacheName = "content" | "query";
+
+export type CacheOutcome = "hit" | "miss" | "revalidated";
+
+/**
+ * The line the log-based metric extracts its labels from.
+ *
+ * `metric` is a constant discriminator rather than a match on the message
+ * text, so the filter does not break the day somebody rewords the log. These
+ * two field names are the metric's only dimensions and
+ * `monitoring/cache-lookup-metric.yaml` must agree with them — a rename here
+ * silently empties the dashboard, which is why the filter is asserted in
+ * `test/cache.test.ts` rather than left to a comment.
+ */
+function report(cache: CacheName, outcome: CacheOutcome): void {
+	logger.info({ metric: "cache_lookup", cache, outcome }, "cache lookup");
+}
 
 type Counter = { hits: number; misses: number; revalidated: number };
 
@@ -28,10 +79,12 @@ const counters: Record<CacheName, Counter> = {
 
 export function recordHit(cache: CacheName): void {
 	counters[cache].hits += 1;
+	report(cache, "hit");
 }
 
 export function recordMiss(cache: CacheName): void {
 	counters[cache].misses += 1;
+	report(cache, "miss");
 }
 
 /**
@@ -45,6 +98,7 @@ export function recordMiss(cache: CacheName): void {
  */
 export function recordRevalidated(cache: CacheName): void {
 	counters[cache].revalidated += 1;
+	report(cache, "revalidated");
 }
 
 export type CacheStats = {

@@ -35,6 +35,7 @@ const EXTRACTION = {
 	canonicalUrl: "https://example.com/a",
 	image: "https://example.com/card.png",
 	text: "Body text long enough to be worth caching.",
+	publishedAt: null,
 	contentHash: "hash-1",
 };
 

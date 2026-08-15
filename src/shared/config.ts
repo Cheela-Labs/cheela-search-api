@@ -137,6 +137,59 @@ const schema = z
 					.filter(Boolean),
 			),
 
+		/**
+		 * What to do with the paid vendors: try them in order, or ask them all.
+		 *
+		 * **This is a bill, not a tuning knob.** PLAN.md's cost model says
+		 * upstream API calls are the dominant cost per query, so `fanout`
+		 * multiplies the largest line item by the number of configured vendors on
+		 * every query — including all the ones the first vendor would have
+		 * answered perfectly well.
+		 *
+		 * What it buys is a wider *candidate set*, which is a real gain and a
+		 * different one from better ordering: two vendors disagree about which
+		 * ten pages exist far more than they disagree about their order, and a
+		 * page that is never fetched cannot be reranked into an answer.
+		 *
+		 * Defaults to `rotate` because the default must not be the expensive one.
+		 * Traffic being low is a reason to *choose* fan-out deliberately, not a
+		 * reason to ship it as the thing that happens when nobody decides.
+		 */
+		SEARCH_PROVIDER_MODE: z.enum(["rotate", "fanout"]).default("rotate"),
+
+		/**
+		 * Free specialist retrievers, asked in parallel alongside the paid ones.
+		 *
+		 * Unlike `SEARCH_PROVIDER_ORDER` these cost nothing, so they are on by
+		 * default: the reason to omit a retriever is normally its bill, and there
+		 * is not one. A name whose credentials are missing is skipped, so listing
+		 * `github` without a token is not an error.
+		 */
+		SEARCH_SUPPLEMENTS: z
+			.string()
+			.default("wikipedia,github")
+			.transform((value) =>
+				value
+					.split(",")
+					.map((name) => name.trim())
+					.filter(Boolean),
+			),
+
+		/**
+		 * Lifts GitHub search from 10 requests per minute to 30.
+		 *
+		 * Required for the provider to be built at all, and that is deliberate:
+		 * unauthenticated, one Cloud Run instance would exhaust the quota in about
+		 * six seconds of ordinary traffic and then contribute nothing but
+		 * `rate-limited` entries to the retrieval statistics — which is worse than
+		 * being absent, because it makes an extraction metric look like an
+		 * extraction problem.
+		 *
+		 * Needs no scopes. A fine-grained token with zero permissions raises the
+		 * rate limit, which is the only thing we want from it.
+		 */
+		GITHUB_TOKEN: z.string().min(1).optional(),
+
 		/* ---------------------------------------------------------------------
 	   Composition — step 6 of PLAN.md's build order.
 

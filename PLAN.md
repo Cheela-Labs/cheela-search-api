@@ -1,6 +1,6 @@
 # apps/search-api — build plan
 
-**Status:** Phase 0 — deployed; steps 0–6 accepted (6 on 2026-08-15); step 5 code-done, not accepted; step 7 code-done, not accepted · Phase 1 — first slice built 2026-08-15 · **Scope:** Phase 0 through Phase 2
+**Status:** Phase 0 — deployed; steps 0–6 accepted (6 on 2026-08-15); step 5 accepted 2026-08-15; step 7 dashboard built, accepts on its first production traffic · Phase 1 — first slice built 2026-08-15 · **Scope:** Phase 0 through Phase 2
 **Consumer:** `apps/search-web`, which already speaks this service's event contract
 **Host:** Google Cloud Run
 
@@ -229,6 +229,72 @@ termination, and the second one never gets added later, under pressure, when
 the first one changes its pricing. Both have free tiers, so this costs the
 interface and nothing else.
 
+**3b · Fan-out, and two free specialists.** — *built 2026-08-15.*
+`src/infra/upstream/fanout.ts`, `wikipedia.ts`, `github.ts`.
+
+→ **This overrules step 3's own argument against fan-out, and the argument was
+half right.** `createRotation` says asking both vendors "would double the bill
+to merge two rankings we have no principled way to merge — and the pipeline
+re-ranks over fetched passages anyway, so a second opinion about ordering buys
+nothing." The ordering half stands. What it missed is that fan-out does not
+mainly buy an opinion about *order*; it buys a different **candidate set**. Two
+vendors disagree about which ten pages exist far more than they disagree about
+how to sort them, and **a page that is never fetched cannot be reranked into
+the answer.**
+
+→ *Round-robin is the whole merge policy, and that is not laziness.* Scores
+from two vendors are not comparable — one provider's 0.9 and another's 0.9
+answer different questions, and normalising them invents an agreement that does
+not exist. Position is comparable: each provider's first result is its own best
+guess. So `interleaveAll` takes one from each in turn and the reranker settles
+quality later, over text we fetched and read ourselves — the only comparison in
+this pipeline grounded in something we verified.
+
+→ *`SEARCH_PROVIDER_MODE` defaults to `rotate`, because the default must not be
+the expensive one.* Fan-out multiplies the dominant cost line by the number of
+paid vendors on every query, including all the ones the first vendor would have
+answered perfectly. Low traffic is a reason to *choose* it deliberately, not a
+reason to ship it as what happens when nobody decides.
+
+→ **The specialists are a different argument entirely: they are free, so they
+never had to justify themselves against the query.** Wikipedia needs no
+credential and has never once refused us — worth stating next to a corpus where
+41% of retrieval failures are sites declining to serve an identified bot. On an
+informational query it contributes a page that will actually extract, which
+beats a page that ranks better and returns 403. GitHub reaches the README,
+which is what actually answers `pgvector hnsw index parameters`.
+
+→ *They are additive within a small ceiling, not competitors for the same
+slots.* Merging specialists into a fixed budget would mean every Wikipedia
+result displacing a general one — strictly worse on `nike jordans`, where an
+encyclopedia article about the shoe would crowd out the shops that sell it, and
+the specialist has no way to know the query was not for it. Three extra pages
+on a stage that already fetches six at a time is at most one more wave.
+
+→ *And they are kept out of `SEARCH_PROVIDER_ORDER` deliberately.* A rotation
+that failed over from Tavily to Wikipedia would answer `cheap flights to goa`
+with an encyclopedia article and call it a successful search. They are not
+interchangeable with a general vendor and one list invites treating them as
+though they were.
+
+→ **GitHub is token-gated, and unauthenticated is worse than absent.** 10
+requests per minute is exhausted by one Cloud Run instance in about six seconds
+of ordinary traffic, after which it contributes nothing but `rate-limited`
+entries — which would make an *extraction* metric look like an extraction
+problem. A token with no scopes raises it to 30.
+
+→ *One case where a specialist changes the verdict:* if every paid vendor
+failed and a specialist answered, the result is theirs rather than an error
+frame. A degraded answer from Wikipedia beats "no search provider answered" on
+a query we can in fact still answer.
+
+→ *The suite sets `SEARCH_SUPPLEMENTS=""`, and that line is load-bearing.*
+Wikipedia needing no credential means it is built whenever it is listed — so
+the process-wide `upstream` would reach the real en.wikipedia.org from any test
+using default dependencies. This was found by a test that started passing for
+the wrong reason: `app.test.ts` asserts that a failed search is an error
+*frame*, and it stopped failing because Wikipedia answered.
+
 **4 · Fetch and extract** — `src/domain/retrieval/`. — *done, with one caveat.*
 Top 6–10 candidates in parallel, through the egress client. Main-content
 extraction, boilerplate stripped, hard per-URL timeout. A slow page is dropped,
@@ -263,6 +329,21 @@ crawl under a name an operator can block. So `extracted / requested` measures ho
 many sites block bots as much as it measures extraction. **Redefine the metric
 over pages that did not refuse us**, and count refusals separately, before
 treating 0.90 as reachable.
+→ **Latency note, 2026-08-15: the slow half of the tail is a page that never
+answers, not work we are doing.** Across the 26-query set the median query took
+~7 s and the slowest took 15–18 s — and the slow ones include
+`what is the largest planet in the solar system`, which is not a hard question.
+`timeout` and `rate-limited` are 8% of retrieval failures, and unlike a `403`
+they are paid for in wall-clock *before* they fail: the deadline lives per
+request in the egress client, the read stage runs six at a time, and one dead
+URL in the last wave holds the stage open for its full timeout while
+contributing nothing. A `403` costs a round trip; a timeout costs the budget.
+→ *So the cheapest latency work here is not a faster extractor.* It is
+declining to wait the full deadline for the last page or two once enough have
+answered — which is step 4's own rule, "a slow page is dropped, never waited
+on", applied to the stage as well as to the page. Not built, and deliberately
+recorded rather than done alongside step 5: it changes what reaches the
+composer, so it needs its own before-and-after on the harness.
 
 **R · Routing** — `src/domain/route/`. — *built 2026-08-13, ahead of its phase.*
 Four intents, ambiguity resolving downward.
@@ -280,6 +361,29 @@ classifies **concurrently with the upstream call**, resolving inside its
 → *`action` is never returned*, even when a query plainly asks for one. There is
 no invoker yet, and a route to a capability that cannot be called is a route to
 a dead end. Phase 2 changes one line.
+→ **Freshness, added 2026-08-15.** The router now also says whether a query's
+answer changes within days, and a `high` verdict forces the content cache to
+revalidate. The cache holds a page for **seven days**, which is right for almost
+everything and is a *wrong answer with a good response time* for the small class
+of queries that move — `current node.js lts version` is in the eval set for
+exactly this, and a seven-day-old copy of a release page does not look stale, it
+looks like an answer.
+→ *Revalidation, not bypass, and the distinction is the entire cost argument.*
+Skipping the cache would re-download and re-extract every page on every volatile
+query. Forcing the conditional request instead means an unchanged page answers
+`304` — one round trip, no body, no extraction, no re-chunking — so correctness
+on these queries costs a round trip rather than a re-read, and only a page that
+genuinely changed pays the full fetch. Which is precisely when it is worth
+paying.
+→ *Two values, `high` and `normal`, because the action it drives is binary.* A
+`medium` tier would have to be mapped onto one of these two anyway, at which
+point the mapping is the real policy and the third name only hides where it
+lives.
+→ *The marker is parsed as a field, not a position.* The prompt asks for
+`intent | rewrite | fresh` and models reliably emit two fields, sometimes
+reversed. Reading by position gives an informational query a retrieval query of
+`"fresh"` — which the pipeline would then search for, and which looks like a bad
+index rather than a bad parse.
 → *A cheaper model than the composer's* — `gemini-2.5-flash-lite` against
 `2.5-flash`. Routing picks one of three words on every query; composition writes
 the answer once. This is the first stage to use the per-stage model pin the seam
@@ -295,6 +399,18 @@ search, so it overlaps the search already in flight instead of following it; the
 merged candidate list is interleaved and capped at `limit + 4`. Result on that
 query: 2 sources → 9 destinations, including nike.com, finishline, jdsports and
 flightclub.
+→ **Open, found 2026-08-15: a schemeless URL with a path does not shortcut, and
+routing accuracy cannot see it.** `npmjs.com/package/hono` took **5.5 s and a
+full pipeline** where `github.com` took 1 ms. `routeStructurally` handles a
+bare hostname and a URL carrying a scheme; this is neither, so `HOSTNAME` fails
+on the `/package/hono` and it falls through to the ordinary path
+(`src/domain/route/structural.ts:61`).
+→ *The instructive half is that the metric read 100%.* The model classifier
+then returned `navigational` — correctly — so routing accuracy counted it right
+while the query cost eight page fetches and a model call. **The metric measures
+the verdict; the shortcut keys off the structural pass**, and nothing yet
+measures whether a navigational query actually skipped retrieval. A latency
+assertion per intent would have caught this and a label check never will.
 
 **W · Where to go** — `places` events. — *built 2026-08-13, with routing.*
 Destinations for discovery queries: a link, a host, a title and the page's own
@@ -344,10 +460,100 @@ hundred passages from pages an upstream engine already judged relevant. Semantic
 ranking earns its model call per query on the request path or it does not, and
 **the eval harness is what says which.** Adding it first would be exactly the
 mistake the plan warns about.
-→ *Not accepted:* the criterion is recall on the labelled set, and that set does
-not exist. What is asserted instead is behaviour that must hold whatever the
-numbers say — distinctive terms beat common ones, no single page owns the whole
+→ *What is asserted in tests* is behaviour that must hold whatever the numbers
+say — distinctive terms beat common ones, no single page owns the whole
 context, and the shortfall from capping is filled rather than returned thin.
+→ *Status:* **accepted, 2026-08-15.** The criterion was "recall on the labelled
+set clears the bar, and the numbers are per-stage rather than end-to-end", and
+the blocker was that the set did not exist. It does now: `mustRetrieve` in
+`eval/queries.jsonl` labels the *facts* a correct answer has to have found, and
+the harness checks each one at three points — the fetched pages, the passages
+that survived ranking, the answer itself — so a missing fact names the stage
+that lost it instead of the symptom.
+
+| | value | n |
+|---|---|---|
+| passage recall | **90.0%** | 20 queries |
+| **lost by ranking** | **3.3%** | 30 facts that reached the pool |
+
+→ *The bar this plan never wrote down is written down now:* **passage recall
+> 0.85**. Set here rather than back-dated, and set where it is because the two
+buckets below say the remaining loss is not retrieval's to fix.
+
+→ **The embedding stage stays deferred, and now on evidence rather than on
+argument.** Of 31 labelled facts, 30 were fetched, and 29 of those survived into
+the composer's context. **BM25 dropped exactly one.** That single fact is the
+entire headroom a semantic reranker could buy, and buying it costs a model call
+per query on the request path, forever, on every query including the 29 that
+did not need it. Step 5's own position was that semantic ranking "earns its
+model call per query on the request path or it does not, and the eval harness
+is what says which." It says no. Revisit if the number moves, not on taste.
+
+→ *Where the facts went, which is the more useful half:*
+
+| bucket | n | whose |
+|---|---|---|
+| `answered` | 27 | — |
+| `composition` | 2 | a passage carried it; the answer did not use it |
+| `ranking` | 1 | the ranker or the chunker dropped it |
+| `retrieval` | 1 | never fetched, or extraction lost it |
+
+**Composition loses twice what ranking does.** Small n, and a clear direction:
+the next quality work is not in retrieval. It is the same finding as the
+"Australian wildfire" answer that would not lead with Black Summer, which this
+plan called "a retrieval problem wearing a composition problem's clothes" — and
+on this measurement it is the other way round.
+
+**5b · Document signals — title match and recency.** — *built 2026-08-15.*
+`applySignals` in `src/domain/retrieval/rank.ts`.
+
+→ *Kept out of the `Ranker` seam on purpose.* A ranker answers one question —
+how well does this passage match this query — and every future implementation
+of that seam would otherwise have to reimplement title and recency handling.
+They are the same two multipliers whatever produced the base score.
+
+→ **Multiplicative, because BM25 scores have no fixed scale.** A score depends
+on the query's IDF profile, so the same additive bonus is decisive on one query
+and invisible on the next. A multiplier means "worth half again as much"
+regardless of magnitude, which is a claim somebody can argue with.
+
+→ **A zero score stays zero, and that is the load-bearing property.** A passage
+containing none of the query's terms scores 0, and 0 times any multiplier is 0
+— so a recent date cannot float a passage that is not about the query. That is
+precisely the failure people mean when they say freshness ranking made results
+worse, and here it is structural rather than tuned.
+
+→ **Absence of a date is never a penalty.** Most of the web declares no date, so
+a signal that punished silence would be ranking on whether a CMS emits Open
+Graph tags. Recency may only ever *promote* a page that proved it is recent.
+The natural-looking alternative — defaulting an unknown date to `now()` — would
+have made every uncached page the freshest thing in the result set.
+
+→ *Recency applies only when the router said `fresh`.* On an ordinary query the
+multiplier is exactly 1 and the stage does nothing, which is the point: a date
+is allowed to reorder results only when the query said dates matter.
+
+→ *The signals apply within the lexical shortlist, never the whole pool.* A
+passage BM25 placed outside the top forty-eight is not one a matching title
+should rescue — these break ties among passages already judged relevant, and
+letting them reach further would make the `<title>` tag a retrieval mechanism.
+
+→ *Modified time beats published time*, because the question is "how current is
+this content", not "when did this URL first exist". A release-notes page written
+in 2009 and updated last week is current, and ranking it as sixteen years old is
+the exact failure the signal exists to prevent.
+
+→ *Placeholder dates are discarded rather than believed.* A great many pages
+emit `0001-01-01` or a Unix zero for "unset"; accepting one hands the ranker a
+document that is confidently ancient rather than one whose date is unknown.
+Those are different things and only one of them is true.
+
+→ *`published_at` is stored, in migration 0005, and that is the third time this
+table has needed it.* Extraction only runs on a cache **miss**, so a
+column-less version would rank correctly against a cold cache and lose the
+signal entirely as the cache warmed — the shape this plan already called "the
+worst kind of bug, because it improves as the cache gets colder", after `image`
+and after the query cache's titles.
 
 **6 · Compose and stream** — `src/domain/compose`, `src/domain/pipeline.ts`. — *accepted, 2026-08-15.*
 Citation per claim. Emit blocks as they are produced.
@@ -442,16 +648,56 @@ been the wrong fix twice — it widens what a schema change can reach, and it
 makes any new required variable silently break migrations until somebody
 remembers the job.
 
-→ *Not accepted:* the criterion is a hit rate on a dashboard, and the numbers
-are on `/health` rather than on one. The counters are per instance and reset
-with the container, which is the right first step and not the finished one —
-the alternative is a counters table written on the request path, buying
-durability by adding a write to the path the cache exists to make cheaper.
+→ *Status:* **the dashboard exists**, as code, in `monitoring/` — a log-based
+metric and four widgets, applied by `monitoring/apply.sh` and live in the
+project. The content-cache scorecard carries the **>0.55 gate as a threshold on
+the widget**, so it says whether the gate is met rather than leaving that to
+somebody's memory.
+
+→ **`/health` could never have been the number, and that is what was blocking
+this.** Its counters live in the process, so they reset every time an instance
+is replaced — and a service that scales to zero spends most of its life having
+just forgotten everything it knew. So the process now emits one structured line
+per cache decision and Cloud Monitoring counts them. That is this plan's own
+position — "the sum across instances is the number that matters and that is the
+collector's job" — carried one step further, because the *counting* is the
+collector's job too. The counters stay for a local read and for the tests, no
+longer pretending to be the metric.
+
+→ *Three alternatives were rejected and are recorded because each looks
+obvious.* A **periodic flush** of the totals is cheaper in log volume and wrong
+on this host: Cloud Run throttles CPU to near zero between requests, so a timer
+is not guaranteed to fire and the last interval before an instance dies is
+lost. A **per-query summary line** is eight times less volume and needs a
+request-scoped counter threaded through both the fetch stage and the upstream
+rotation to buy a ratio that comes out identical. A **counters table in
+Postgres** buys durability by adding a write to the exact path the cache exists
+to make cheaper.
+
+→ *The line names no query, no URL and no caller* — the property that lets
+`/health` sit outside the token gate, kept true on the way out, and asserted as
+an exact key set in `test/cache.test.ts` so that adding a field has to be
+somebody's deliberate decision. The field names are also a contract with
+`monitoring/cache-lookup-metric.yaml` that TypeScript cannot check, since the
+other end is a YAML file in another system: rename one and nothing fails, the
+metric simply matches nothing and the dashboard reports a confident, empty
+zero. That is why it is a test and not a comment.
+
+→ *Not yet accepted, and only one thing is missing:* a log-based metric does not
+backfill, so the dashboard counts nothing until the deploy that starts emitting
+the lines. **Accepts when it shows a real hit rate from production traffic.**
 
 **Parallel track — the eval harness.** — *harness done 2026-08-15; the query
-set is 10 of 200.* `scripts/eval.ts`, `scripts/judge.ts`, `eval/queries.jsonl`.
+set is 26 of 200.* `scripts/eval.ts`, `scripts/judge.ts`, `eval/queries.jsonl`.
 The 200 labeled queries are a writing task, not a coding one; start them at
 step 0. The harness code lands at step 2.
+
+*The 16 added on 2026-08-15 were written for step 5 specifically*, not as
+general progress toward 200: its criterion needs facts with exactly one
+spelling, on queries whose pages are certain to exist, so that a fact which
+never reaches a passage was demonstrably lost by chunking or ranking rather
+than by coverage. A set grown for one stage's question is worth more than the
+same count grown at random.
 
 **Every label is optional except the query**, so a half-labelled set still
 measures something and each metric reports the `n` it was computed over. A
@@ -461,15 +707,52 @@ prerequisite.
 
 **Two findings on the first full run, both real:**
 
-| Metric | First measurement | Bar |
-|---|---|---|
-| routing accuracy | 100% (n=9) | — |
-| extraction rate, raw | 60.3% (n=78 pages) | — |
-| **extraction, addressable** | **71.2%** (n=66 readable) | **>0.90** |
-| citation validity | 100% (n=47) | 1.0 |
-| **restraint on unanswerable** | **0%** (n=1) | — |
-| citation faithfulness *(judged)* | 100% (n=3) | >0.95 |
-| answer correctness *(judged)* | 100% (n=3) | >0.80 |
+**Measured after 3b/5b/freshness landed, 2026-08-15**, over two consecutive
+runs of the same 26 queries — the second after the routing prompt was fixed.
+Both are reported because the pair is the finding.
+
+| Metric | before | run A | run B |
+|---|---|---|---|
+| routing accuracy | 100% | 96.0% | **100%** |
+| extraction, addressable | 66.9% (n=163) | 76.1% (n=222) | **76.0%** (n=225) |
+| domain recall | 50% | 100% | **100%** |
+| passage recall | 90.0% | 100% | **95.0%** |
+| lost by ranking | 3.3% (n=30) | 0.0% (n=31) | **3.2%** (n=31) |
+
+→ **The ranking numbers move by one fact between identical runs, so neither
+0.0% nor 3.2% is a real number.** The web is not a fixed corpus: the upstream
+returns a slightly different set each time, and at n=31 facts a single page
+swings the rate by three points. The honest reading is that the ranker loses
+**about one fact in thirty**, which is where it was before this work — the
+retrieval gains below are real and the ranking gain was noise.
+→ *This is the failure the two-run pair exists to catch*, and it is worth
+stating because run A alone would have justified a confident claim that
+retrieval had stopped losing anything. Any single-run movement of one or two
+facts in this set means nothing.
+→ **What did move, and reproduced across both runs:** addressable extraction
++9 points, domain recall 50% → 100%. Both come from the specialists, and the
+mechanism is not subtle — Wikipedia and GitHub pages extract reliably in a
+corpus where 36% of failures are sites refusing an identified bot.
+→ *A new failure category arrived with them:* `response-too-large` at 6%, which
+is Wikipedia articles exceeding the 2 MB `EGRESS_MAX_BYTES` cap. That cap is an
+egress safety control under Decision 02 and is deliberately **not** raised here.
+
+| Metric | n=10 set | **n=26 set** | Bar |
+|---|---|---|---|
+| routing accuracy | 100% (n=9) | 100% (n=25) | — |
+| extraction rate, raw | 60.3% (n=78 pages) | 54.5% (n=200 pages) | — |
+| **extraction, addressable** | **71.2%** (n=66) | **66.9%** (n=163) | **>0.90** |
+| **passage recall** | — | **90.0%** (n=20) | **>0.85** |
+| **↳ lost by ranking** | — | **3.3%** (n=30 facts) | — |
+| citation validity | 100% (n=47) | 100% (n=151) | 1.0 |
+| **restraint on unanswerable** | **0%** (n=1) | **0%** (n=1) | — |
+| citation faithfulness *(judged)* | 100% (n=3) | not re-run | >0.95 |
+| answer correctness *(judged)* | 100% (n=3) | not re-run | >0.80 |
+
+**The addressable rate fell 4.3 points when the set grew, and that is the
+honest direction.** 66 readable pages was too few to speak for the corpus; 163
+is still not many. A metric that improves every time you look at more of the
+world is a metric measuring the sample.
 
 - **Extraction is failing its gate — but by less than it first appeared, and
   for a reason that changes what to do about it.** The first measurement said
@@ -484,24 +767,37 @@ prerequisite.
   are reported. The raw rate is what a reader experiences; the addressable one
   is what an engineer can move.
 
-  | reason | share | ours? |
-  |---|---|---|
-  | `refused-by-site` | 39% | no — policy, not a bug |
-  | `no-main-content` | 23% | **yes** |
-  | `too-short` | 16% | **yes** |
-  | `javascript-shell` | 10% | only with a headless browser |
-  | the rest | 12% | mixed |
+  | reason | n=10 set | **n=26 set** | ours? |
+  |---|---|---|---|
+  | `refused-by-site` | 39% | 41% | no — policy, not a bug |
+  | `no-main-content` | 23% | 24% | **yes** |
+  | `javascript-shell` | 10% | 15% | only with a headless browser |
+  | `too-short` | 16% | 8% | **yes** |
+  | `timeout` | — | 5% | **yes**, and see below |
+  | `rate-limited` | — | 3% | **yes** |
+  | `cross-host-redirect` | — | 3% | ours, and deliberate |
 
-  **`no-main-content` and `too-short` are the work** — 39% of failures between
-  them, and the only two buckets large enough to move the addressable rate from
-  71% toward 90%.
+  **`no-main-content` and `too-short` are still the work** — 32% of failures
+  between them on the larger set, and the two largest buckets anybody here can
+  move. The shares held up across a sample two and a half times bigger, which
+  is the useful thing the second run bought.
+
+  *Three categories appear only on the larger set*, and two of them cost
+  latency rather than quality: `timeout` and `rate-limited` are 8% of failures
+  between them, and unlike a `403` they are paid for in wall-clock before they
+  fail. See the latency note under step 4.
 - **A nonsense query produced three sources and a three-block answer.**
   `empty-nonsense` asks about a specification that does not exist and got a
   confident composition. This is the failure a set without unanswerable queries
-  cannot see at all, and it is why one is in the seed.
+  cannot see at all, and it is why one is in the seed. **Unchanged on the
+  larger set** — it produced five sources and four blocks on 2026-08-15 — and
+  it is still measured over a single query, which is the weakest number in this
+  document. Restraint needs its own labelled queries before it means anything.
 
-Neither number is trustworthy at n=10. Both are large enough that the shape is
-not in doubt.
+Neither number was trustworthy at n=10. At n=26 the extraction shares held
+within a couple of points while the rate itself moved four, which says the
+*composition* of the failures is the stable thing and the headline rate is not.
+Work the shares.
 
 **Answer schema, revised 2026-08-15 after a review of a live answer.**
 "Australian wildfire" scored 6.5/10 against what Perplexity and Google's AI

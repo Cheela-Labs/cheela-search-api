@@ -1,0 +1,155 @@
+{
+	"displayName": "Search — cache economics",
+	"mosaicLayout": {
+		"columns": 12,
+		"tiles": [
+			{
+				"xPos": 0,
+				"yPos": 0,
+				"width": 6,
+				"height": 4,
+				"widget": {
+					"title": "Content cache hit rate (Phase 0 gate: > 0.55)",
+					"scorecard": {
+						"timeSeriesQuery": {
+							"timeSeriesFilterRatio": {
+								"numerator": {
+									"filter": "metric.type=\"logging.googleapis.com/user/search_api_cache_lookup\" resource.type=\"cloud_run_revision\" metric.label.\"cache\"=\"content\" metric.label.\"outcome\"=monitoring.regex.full_match(\"hit|revalidated\")",
+									"aggregation": {
+										"alignmentPeriod": "3600s",
+										"perSeriesAligner": "ALIGN_DELTA",
+										"crossSeriesReducer": "REDUCE_SUM"
+									}
+								},
+								"denominator": {
+									"filter": "metric.type=\"logging.googleapis.com/user/search_api_cache_lookup\" resource.type=\"cloud_run_revision\" metric.label.\"cache\"=\"content\"",
+									"aggregation": {
+										"alignmentPeriod": "3600s",
+										"perSeriesAligner": "ALIGN_DELTA",
+										"crossSeriesReducer": "REDUCE_SUM"
+									}
+								}
+							}
+						},
+						"gaugeView": {
+							"lowerBound": 0.0,
+							"upperBound": 1.0
+						},
+						"thresholds": [
+							{
+								"value": 0.55,
+								"color": "YELLOW",
+								"direction": "BELOW"
+							}
+						]
+					}
+				}
+			},
+			{
+				"xPos": 6,
+				"yPos": 0,
+				"width": 6,
+				"height": 4,
+				"widget": {
+					"title": "Query cache hit rate",
+					"scorecard": {
+						"timeSeriesQuery": {
+							"timeSeriesFilterRatio": {
+								"numerator": {
+									"filter": "metric.type=\"logging.googleapis.com/user/search_api_cache_lookup\" resource.type=\"cloud_run_revision\" metric.label.\"cache\"=\"query\" metric.label.\"outcome\"=monitoring.regex.full_match(\"hit|revalidated\")",
+									"aggregation": {
+										"alignmentPeriod": "3600s",
+										"perSeriesAligner": "ALIGN_DELTA",
+										"crossSeriesReducer": "REDUCE_SUM"
+									}
+								},
+								"denominator": {
+									"filter": "metric.type=\"logging.googleapis.com/user/search_api_cache_lookup\" resource.type=\"cloud_run_revision\" metric.label.\"cache\"=\"query\"",
+									"aggregation": {
+										"alignmentPeriod": "3600s",
+										"perSeriesAligner": "ALIGN_DELTA",
+										"crossSeriesReducer": "REDUCE_SUM"
+									}
+								}
+							}
+						},
+						"gaugeView": {
+							"lowerBound": 0.0,
+							"upperBound": 1.0
+						}
+					}
+				}
+			},
+			{
+				"xPos": 0,
+				"yPos": 4,
+				"width": 12,
+				"height": 4,
+				"widget": {
+					"title": "Content cache lookups by outcome — revalidated is counted apart from hit on purpose",
+					"xyChart": {
+						"chartOptions": {
+							"mode": "COLOR"
+						},
+						"dataSets": [
+							{
+								"plotType": "STACKED_AREA",
+								"legendTemplate": "${metric.labels.outcome}",
+								"timeSeriesQuery": {
+									"timeSeriesFilter": {
+										"filter": "metric.type=\"logging.googleapis.com/user/search_api_cache_lookup\" resource.type=\"cloud_run_revision\" metric.label.\"cache\"=\"content\"",
+										"aggregation": {
+											"alignmentPeriod": "300s",
+											"perSeriesAligner": "ALIGN_DELTA",
+											"crossSeriesReducer": "REDUCE_SUM",
+											"groupByFields": ["metric.label.\"outcome\""]
+										}
+									}
+								}
+							}
+						],
+						"yAxis": {
+							"label": "lookups",
+							"scale": "LINEAR"
+						}
+					}
+				}
+			},
+			{
+				"xPos": 0,
+				"yPos": 8,
+				"width": 12,
+				"height": 4,
+				"widget": {
+					"title": "Upstream calls avoided — a query-cache hit is one vendor call not bought",
+					"xyChart": {
+						"chartOptions": {
+							"mode": "COLOR"
+						},
+						"dataSets": [
+							{
+								"plotType": "LINE",
+								"legendTemplate": "${metric.labels.outcome}",
+								"timeSeriesQuery": {
+									"timeSeriesFilter": {
+										"filter": "metric.type=\"logging.googleapis.com/user/search_api_cache_lookup\" resource.type=\"cloud_run_revision\" metric.label.\"cache\"=\"query\"",
+										"aggregation": {
+											"alignmentPeriod": "300s",
+											"perSeriesAligner": "ALIGN_DELTA",
+											"crossSeriesReducer": "REDUCE_SUM",
+											"groupByFields": ["metric.label.\"outcome\""]
+										}
+									}
+								}
+							}
+						],
+						"yAxis": {
+							"label": "lookups",
+							"scale": "LINEAR"
+						}
+					}
+				}
+			}
+		]
+	}
+}

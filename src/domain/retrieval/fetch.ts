@@ -122,6 +122,23 @@ export type RetrieveOptions = {
 	 * dependency, and a database that is down must not stop a search.
 	 */
 	cache?: DocumentStore;
+	/**
+	 * Re-check a cached page even while it is still inside its TTL. Set when the
+	 * router judged the query's answer to change within days.
+	 *
+	 * **Revalidation, not bypass, and the difference is the whole cost
+	 * argument.** Skipping the cache outright would re-download and re-extract
+	 * every page on every fresh query. Forcing the conditional request instead
+	 * means an unchanged page answers `304` — one round trip, no body, no
+	 * extraction, no re-chunking — so correctness on volatile queries costs a
+	 * round trip rather than a re-read. A page that genuinely changed pays the
+	 * full fetch, which is precisely when we want to pay it.
+	 *
+	 * A cached copy with no etag has nothing to make the request conditional
+	 * with, so it degrades to an ordinary fetch. That is correct and not worth
+	 * special-casing: no etag means the origin gave us no way to ask cheaply.
+	 */
+	revalidate?: boolean;
 };
 
 const DEFAULT_CONCURRENCY = 6;
@@ -158,7 +175,10 @@ async function retrieveOne(
 	*/
 	const cached = options.cache ? await options.cache.get(url) : null;
 
-	if (cached?.fresh) {
+	// `revalidate` demotes a fresh entry to a stale one rather than discarding
+	// it: the etag below is what makes the re-check cheap, and throwing the row
+	// away to "get a fresh copy" would throw that away with it.
+	if (cached?.fresh && !options.revalidate) {
 		recordHit("content");
 		return fromCache(cached);
 	}

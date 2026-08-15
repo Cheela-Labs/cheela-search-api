@@ -56,6 +56,21 @@ export type Extraction = {
 	 */
 	image: string | null;
 	text: string;
+	/**
+	 * When the page says it was published or last changed, as an ISO string, or
+	 * null when it does not say.
+	 *
+	 * **Null is the common case and is never treated as "old".** Most of the web
+	 * declares no date, so a ranker that penalised absence would be ranking on
+	 * whether a CMS emits Open Graph tags. Freshness can only ever *promote* a
+	 * page that proved it is recent — see `applySignals` in `rank.ts`.
+	 *
+	 * Read from meta tags and `<time datetime>` only. JSON-LD `datePublished` is
+	 * common on news sites and is deliberately not parsed yet: it means walking
+	 * every `<script type="application/ld+json">` block on an untrusted page, and
+	 * the meta tags cover enough to measure whether this signal is worth more.
+	 */
+	publishedAt: string | null;
 	/** Of the extracted text, so a page whose only change was an ad slot hashes the same. */
 	contentHash: string;
 };
@@ -250,6 +265,64 @@ function imageFrom(document: Document, url: string): string | null {
 	return null;
 }
 
+/**
+ * The earliest year a page date is believed rather than discarded.
+ *
+ * Not paranoia about the 1990s web: a great many pages emit `0001-01-01` or a
+ * Unix epoch zero for "unset", and a date parser that accepts those hands the
+ * ranker a document that is confidently 55 years old rather than one whose date
+ * is unknown. Those are different things and only one of them is true.
+ */
+const EARLIEST_PLAUSIBLE = Date.UTC(1990, 0, 1);
+
+/** Clocks disagree; a page dated slightly ahead of ours is not lying. */
+const FUTURE_TOLERANCE_MS = 24 * 60 * 60 * 1_000;
+
+/**
+ * When the page says it was published or last changed.
+ *
+ * Modified time is preferred over published time, because what the ranker is
+ * asked is "how current is this content", not "when did this URL first exist".
+ * A release-notes page written in 2009 and updated last week is current, and
+ * ranking it as sixteen years old is exactly the failure the freshness signal
+ * is for.
+ */
+function publishedFrom(document: Document): string | null {
+	const selectors = [
+		'meta[property="article:modified_time"]',
+		'meta[property="og:updated_time"]',
+		'meta[property="article:published_time"]',
+		'meta[itemprop="datePublished"]',
+		'meta[name="date"]',
+		'meta[name="pubdate"]',
+		'meta[name="last-modified"]',
+	];
+
+	const candidates: (string | null | undefined)[] = selectors.map((selector) =>
+		document.querySelector(selector)?.getAttribute("content"),
+	);
+
+	// `<time datetime>` last: it is markup a page may use many times, and the
+	// first one is as likely to be a comment's timestamp as the article's.
+	candidates.push(
+		document.querySelector("time[datetime]")?.getAttribute("datetime"),
+	);
+
+	for (const candidate of candidates) {
+		const raw = candidate?.trim();
+		if (!raw) continue;
+
+		const parsed = Date.parse(raw);
+		if (Number.isNaN(parsed)) continue;
+		if (parsed < EARLIEST_PLAUSIBLE) continue;
+		if (parsed > Date.now() + FUTURE_TOLERANCE_MS) continue;
+
+		return new Date(parsed).toISOString();
+	}
+
+	return null;
+}
+
 /** The page's own name for itself, preferring what it chose to be shared as. */
 function titleFrom(document: Document): string | null {
 	const candidates = [
@@ -337,6 +410,10 @@ export function extract(
 	}
 
 	const canonicalUrl = canonicalFrom(document, url);
+	// Read before Readability, with the canonical and the image, and for the same
+	// reason: it strips the document down to the article and the date lives in
+	// the head.
+	const publishedAt = publishedFrom(document);
 
 	// Readability mutates the document it is given, and we read the canonical
 	// and the image above first for exactly that reason.
@@ -374,6 +451,7 @@ export function extract(
 			canonicalUrl,
 			image: preview.image,
 			text,
+			publishedAt,
 			contentHash: createHash("sha256").update(text).digest("hex"),
 		},
 	};

@@ -29,6 +29,51 @@ can never detect a regression, because it *is* a recording of today.
 Label from what a correct answer would need. If you do not know, leave it out —
 an absent label is honest and a circular one is worse than nothing.
 
+## Which stage lost it
+
+PLAN.md's step 5 accepts when *"recall on the labeled set clears the bar, and
+the numbers are per-stage rather than end-to-end"*. The second half is the hard
+part. A single recall number tells you the answer was missing something and
+sends you to improve whichever stage you already suspected.
+
+So a `mustRetrieve` fact is checked at three points, and lands in exactly one
+bucket:
+
+| Bucket | What it means | Whose bug |
+|---|---|---|
+| `answered` | It made it all the way through | — |
+| `composition` | A kept passage carried it; the answer did not use it | the composer |
+| `ranking` | A fetched page carried it; no kept passage did | **the ranker or the chunker** |
+| `retrieval` | Nothing we read carried it at all | upstream, or extraction |
+
+`mustMention` and `mustRetrieve` are separate fields because they ask different
+questions of different stages. A fact that is in the passages and not in the
+answer is a composition fault, and labelling it only as `mustMention` reports
+it as one undifferentiated miss.
+
+**The `ranking` bucket is why this exists.** PLAN.md defers the embedding stage
+on the argument that BM25 over "a hundred passages from pages an upstream
+engine already judged relevant" is a strong baseline, and that a semantic
+ranker "earns its model call per query on the request path or it does not, and
+the eval harness is what says which." The `lost by ranking` rate is that
+answer: near zero means there is no headroom for a better ranker to buy, and a
+semantic reranker would be paying a per-query model call for passages BM25 was
+already keeping.
+
+### Spelling a `mustRetrieve` label
+
+The check is a lowercased substring, so the label is only worth what its
+spelling is worth.
+
+- **Prefer facts with one spelling.** `299,792,458` and `ef_construction` are
+  either present or not. "fast" is a judgement call wearing a substring's
+  clothes.
+- **Short common words inflate the score.** `permanent` will match text that is
+  not about the fact at all. The error runs toward false confidence, so when a
+  metric looks suspiciously good, check the labels before believing it.
+- **Do not label a fact whose spelling moves.** A version number that ships
+  next month makes the label wrong rather than the pipeline.
+
 ## Fields
 
 ```jsonc
@@ -59,6 +104,12 @@ an absent label is honest and a circular one is worse than nothing.
   // answer about the wrong subject, which is the failure worth catching
   // cheaply. The judge is for everything subtler.
   "mustMention": ["capability", "discovery"],
+
+  // Facts a correct answer has to have *found*, checked against the passages
+  // rather than against the prose. This is step 5's label — see "Which stage
+  // lost it" below for why it is a separate field from `mustMention` and not
+  // a stricter version of it.
+  "mustRetrieve": ["ef_construction", "ef_search"],
 
   // Expected to return nothing useful. Rare and valuable: a set with no
   // unanswerable queries cannot tell a confident wrong answer from a right
