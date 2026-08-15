@@ -1,6 +1,6 @@
 # apps/search-api — build plan
 
-**Status:** Phase 0 — deployed; steps 0–6 accepted (6 on 2026-08-15); step 5 code-done, not accepted; step 7 code-done, not accepted · **Scope:** Phase 0 through Phase 2
+**Status:** Phase 0 — deployed; steps 0–6 accepted (6 on 2026-08-15); step 5 code-done, not accepted; step 7 code-done, not accepted · Phase 1 — first slice built 2026-08-15 · **Scope:** Phase 0 through Phase 2
 **Consumer:** `apps/search-web`, which already speaks this service's event contract
 **Host:** Google Cloud Run
 
@@ -554,6 +554,25 @@ If the search engine is not good, no action layer rescues it.
 **Results that know what a site can do.** The capability index joins to results
 by domain. Nothing is invoked; this phase is pure information gain and carries
 no execution risk.
+
+> **First slice built, 2026-08-15.** `capability.sites`, `manifests` and
+> `capabilities`; `src/probe.ts` as the out-of-band job; a hash join on domain
+> in the pipeline; chips on the source card. Verified against
+> `demo-calender.cheelalabs.com` (7 capabilities) and
+> `demo-shop.cheelalabs.com` (15), with the request-path lookup at 38 ms for
+> three domains.
+>
+> **Not built:** `enrichment`, `phrase_vectors` and `invocations` — the three
+> tables that serve capability *retrieval*, matching a query to an action. Also
+> absent: the DNS `TXT` sweep and the submission funnel. What exists is the
+> opportunistic source only, which is the one weighted by real demand.
+>
+> **The effects derivation was wrong on its first real run and is worth
+> remembering.** It matched the nouns `order` and `payment`, so
+> `orders-get-order` and `store-list-payment-methods` — both reads — came back
+> `financial`. It keys on verbs now. A chip warning about a payment on a
+> capability that only lists them is a false alarm, and false alarms are how
+> people learn to ignore the true ones.
 
 ### Where manifests come from
 

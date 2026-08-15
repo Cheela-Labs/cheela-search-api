@@ -1,3 +1,7 @@
+import type {
+	CapabilityStore,
+	SiteCapability,
+} from "../infra/db/capability-store";
 import type { DocumentStore } from "../infra/db/document-store";
 import type { QueryLog } from "../infra/db/query-log";
 import type { EgressClient } from "../infra/egress/client";
@@ -45,6 +49,15 @@ export type PipelineDeps = {
 	queryLog?: QueryLog;
 	/** The content cache, threaded through to the fetch stage. */
 	documents?: DocumentStore;
+	/**
+	 * The capability index. Optional, like every other store here.
+	 *
+	 * Read as a hash join on domain and nothing more — PLAN.md is explicit that
+	 * a manifest fetched during a query "would blow the 60 ms capability-lookup
+	 * budget and the 'chips visible before the answer' argument with it". The
+	 * fetching happens in `dist/probe.js`, out of band.
+	 */
+	capabilities?: CapabilityStore;
 	/**
 	 * A measurement seam for the eval harness. Never affects behaviour.
 	 *
@@ -370,6 +383,42 @@ export async function* runPipeline(
 		if (aborted()) return;
 
 		const sources = sourcesFrom(passages);
+
+		/*
+		  Two cheap things, both on domains we already have.
+
+		  The read is one indexed statement for every source at once. The write
+		  is `INSERT ... DO NOTHING`, which notes that these domains exist so the
+		  probe job can look at them later — the opportunistic source PLAN.md
+		  prefers, "weighted by what people actually search for, which beats any
+		  static ranking list".
+
+		  Neither fetches anything. A domain seen for the first time contributes
+		  no chips to *this* answer and may contribute some to the next one.
+		*/
+		const domains = [...new Set(sources.map((source) => source.domain))];
+		const known: Map<string, SiteCapability[]> = deps.capabilities
+			? await deps.capabilities.capabilitiesFor(domains)
+			: new Map();
+
+		// Not awaited. Nobody is waiting on it, it swallows its own errors, and
+		// putting a write between the sources and the first answer block would
+		// spend the latency the event ordering exists to protect.
+		void deps.capabilities?.enqueue(domains);
+
+		for (const source of sources) {
+			const found = known.get(source.domain) ?? [];
+			if (found.length === 0) continue;
+			source.capabilities = found.map((capability) => ({
+				domain: capability.domain,
+				// The spec allows `invocationName` to be absent; the wire type does
+				// not, so fall back to the identity rather than dropping a real
+				// capability over a presentation field.
+				invocationName: capability.invocationName ?? capability.name,
+				effects: capability.effects,
+				callable: capability.invocableByUs,
+			}));
+		}
 
 		/*
 		  Logged here, once we know which domains actually answered.

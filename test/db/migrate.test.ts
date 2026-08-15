@@ -54,7 +54,12 @@ suite("migrations", () => {
 	});
 
 	it("serialises concurrent runners rather than racing them", async () => {
+		// Both planes. `capability` arrived with 0004 and this cleanup listed
+		// only `web`, so the ledger was dropped while `capability.sites` survived
+		// — and the next run failed on "relation already exists" while claiming
+		// to start from an empty database.
 		await pool.query("DROP SCHEMA IF EXISTS web CASCADE");
+		await pool.query("DROP SCHEMA IF EXISTS capability CASCADE");
 		await pool.query("DROP TABLE IF EXISTS public.schema_migrations");
 
 		// Four cold starts inside the same second, which is exactly what Cloud

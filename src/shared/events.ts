@@ -99,6 +99,21 @@ export type Source = {
 	image?: string;
 	capturedLabel?: string;
 	passages: Passage[];
+	/**
+	 * What this source's domain says it can do, from its ADS manifest.
+	 *
+	 * Optional and usually absent — most of the web publishes no manifest, and
+	 * `404` is the normal outcome rather than a defect. Present here rather than
+	 * in a separate event because a capability belongs to a *source*, and
+	 * sources already stream before the first answer block: PLAN.md's Phase 1
+	 * gate wants "chips visibly ahead of the answer", which this gets for free
+	 * from an ordering the contract already guarantees.
+	 *
+	 * **Nothing here is invoked.** This phase is pure information gain and
+	 * carries no execution risk — `callable` describes whether we *could*, not
+	 * whether anything will.
+	 */
+	capabilities?: CapabilityRef[];
 };
 
 /**

@@ -3,6 +3,7 @@ import { cors } from "hono/cors";
 import { composer } from "./domain/compose";
 import { type PipelineDeps, runPipeline } from "./domain/pipeline";
 import { classifier } from "./domain/route";
+import { CapabilityStore } from "./infra/db/capability-store";
 import { PostgresDocumentStore } from "./infra/db/document-store";
 import { databaseReachable, pool } from "./infra/db/pool";
 import { PostgresQueryCache } from "./infra/db/query-cache";
@@ -50,6 +51,7 @@ export function createApp(overrides: Partial<PipelineDeps> = {}) {
 		composer: overrides.composer ?? composer,
 		classifier: overrides.classifier ?? classifier,
 		documents: overrides.documents ?? new PostgresDocumentStore(pool),
+		capabilities: overrides.capabilities ?? new CapabilityStore(pool),
 		queryLog: overrides.queryLog ?? new PostgresQueryLog(pool),
 		candidateLimit: overrides.candidateLimit,
 		passageLimit: overrides.passageLimit,
