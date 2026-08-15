@@ -3,12 +3,17 @@ import { cors } from "hono/cors";
 import { composer } from "./domain/compose";
 import { type PipelineDeps, runPipeline } from "./domain/pipeline";
 import { classifier } from "./domain/route";
-import { databaseReachable } from "./infra/db/pool";
+import { PostgresDocumentStore } from "./infra/db/document-store";
+import { databaseReachable, pool } from "./infra/db/pool";
+import { PostgresQueryCache } from "./infra/db/query-cache";
+import { PostgresQueryLog } from "./infra/db/query-log";
 import { egress } from "./infra/egress";
 import { upstream } from "./infra/upstream";
+import { withQueryCache } from "./infra/upstream/cached-rotation";
 import { config } from "./shared/config";
 import { frame, type SearchEvent } from "./shared/events";
 import { logger } from "./shared/logger";
+import { cacheStats } from "./shared/metrics";
 
 /** Longer than any sensible query, short enough to bound what reaches a model. */
 const MAX_QUERY = 400;
@@ -30,11 +35,22 @@ export function createApp(overrides: Partial<PipelineDeps> = {}) {
 	// nothing but a test overrides, as constructor parameters rather than
 	// configuration, so no environment variable can swap a provider on a running
 	// service.
+	/*
+	  The caches are constructed here rather than imported as singletons so a
+	  test can pass its own — or pass none, which is the shape that matters:
+	  every one of them is optional, and the pipeline runs exactly as it did
+	  before step 7 when they are absent. A database outage costs money, not
+	  availability.
+	*/
 	const deps: PipelineDeps = {
-		upstream: overrides.upstream ?? upstream,
+		upstream:
+			overrides.upstream ??
+			withQueryCache(upstream, new PostgresQueryCache(pool)),
 		egress: overrides.egress ?? egress,
 		composer: overrides.composer ?? composer,
 		classifier: overrides.classifier ?? classifier,
+		documents: overrides.documents ?? new PostgresDocumentStore(pool),
+		queryLog: overrides.queryLog ?? new PostgresQueryLog(pool),
 		candidateLimit: overrides.candidateLimit,
 		passageLimit: overrides.passageLimit,
 	};
@@ -59,6 +75,18 @@ export function createApp(overrides: Partial<PipelineDeps> = {}) {
 			status: "ok",
 			plane: "query",
 			database: (await databaseReachable()) ? "reachable" : "unreachable",
+			/*
+			  PLAN.md gates step 7 on "hit rate is on a dashboard, from the first
+			  day it can be" — and argues that cache hit rate decides unit
+			  economics outright at MVP, because the dominant cost per query is
+			  upstream calls and page fetches.
+
+			  Reported on `/health` rather than behind the token gate, so a
+			  collector can scrape it without holding a search credential. The
+			  numbers are counts of cache lookups; they name no query, no URL and
+			  no caller, so there is nothing here to protect.
+			*/
+			caches: cacheStats(),
 		}),
 	);
 

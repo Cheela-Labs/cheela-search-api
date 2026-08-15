@@ -1,6 +1,6 @@
 # apps/search-api — build plan
 
-**Status:** Phase 0 — deployed; steps 0–4 accepted; 5 and 6 code-done; step 7 remaining · **Scope:** Phase 0 through Phase 2
+**Status:** Phase 0 — deployed; steps 0–6 accepted (6 on 2026-08-15); step 5 code-done, not accepted; step 7 code-done, not accepted · **Scope:** Phase 0 through Phase 2
 **Consumer:** `apps/search-web`, which already speaks this service's event contract
 **Host:** Google Cloud Run
 
@@ -349,7 +349,7 @@ not exist. What is asserted instead is behaviour that must hold whatever the
 numbers say — distinctive terms beat common ones, no single page owns the whole
 context, and the shortfall from capping is filled rather than returned thin.
 
-**6 · Compose and stream** — `src/domain/compose`, `src/domain/pipeline.ts`. — *code done; not accepted.*
+**6 · Compose and stream** — `src/domain/compose`, `src/domain/pipeline.ts`. — *accepted, 2026-08-15.*
 Citation per claim. Emit blocks as they are produced.
 → *Accepts when:* `apps/search-web` renders a real streamed answer against this
 service with its fixture corpus disabled. That is the integration test — the
@@ -376,13 +376,67 @@ no capabilities.
 → *Invented citations are dropped, and the claim is kept.* A chip that opens
 nothing is worse than no chip — an uncited sentence reads as unsupported, a
 broken citation reads as supported.
-→ **Not accepted:** the criterion is the surface rendering against this service,
-which needs an upstream vendor key. `test/pipeline.test.ts` is as close as it
-gets without one — a stub upstream, a fixture server serving real HTML, and
-every stage between running production code.
+→ *Status:* **accepted, 2026-08-15**, against the criterion as written —
+`search.cheelalabs.com` rendering a streamed answer from
+`search-api.cheelalabs.com` with the fixture corpus disabled.
 
-**7 · The three caches, plus the log.**
+What the live stream shows, for a query with no fixture behind it:
+
+```
+stage(search) → intent(informational) → crawled(8) → stage(search,done)
+→ stage(read) → stage(read,done) → source ×6 → stage(compose)
+→ block ×3 → stage(compose,done) → done
+```
+
+**The ordering the contract depends on holds in production**, not only in
+`test/pipeline.test.ts`: the last `source` event is index 11 and the first
+`block` is index 13, so the surface has its whole rail before a word of the
+answer arrives. The blocks carry interleaved `{"kind":"cite","n":N}` spans
+rather than trailing footnotes, which is citation-per-claim as specified — and
+confirms the LLM composer ran rather than the extractive fallback.
+
+**7 · The three caches, plus the log.** — *code done; not accepted.*
 → *Accepts when:* hit rate is on a dashboard, from the first day it can be.
+→ *Status:* 26 tests — 14 against fakes for the seams, 12 against a real
+Postgres for the SQL. Two of the three caches are built; the embedding cache is
+deferred with the embedding stage it exists for.
+
+**The tables were there since 0001 and nothing had ever read or written them.**
+Every query re-called the vendor and re-fetched every page: the identical query
+twice, back to back against production, cost 6.3s and then 5.2s. That is the
+gap this step closes.
+
+| Object | Where | Key | Lifetime |
+|---|---|---|---|
+| Content cache | `web.documents` | canonical URL, or the URL asked for | 7 days, then revalidated |
+| Query cache | `web.query_cache` | normalised query + provider | 10 minutes |
+| Query log | `web.query_log` | — | permanent |
+
+→ **Every cache is optional and degrades to a miss.** The stores swallow their
+own errors, the pipeline takes them as optional dependencies, and a search with
+no database runs exactly as it did before this step. A cache that can take the
+service down when Postgres is slow is worse than no cache.
+
+→ *Revalidation is counted apart from a hit.* A `304` still costs a round trip
+but no bandwidth, no extraction and no re-chunking. Folding it into hits would
+overstate the saving; folding it into misses would understate it against the
+>0.55 gate.
+
+→ **Three things would have failed silently, and each is now a test.** The
+`documents` table had no `image` column, so a cache hit would have dropped the
+og:image that discovery answers render — the feature would work cold and
+degrade as the cache warmed. The `query_cache` stored URLs but not titles, and
+`pipeline.ts` resolves a source title as
+`extraction.title ?? candidate.title ?? domain`, so hits would have quietly
+fallen back to bare hostnames. And a null title round-tripped through
+`text[]` as `""`, which `??` does not treat as absent — that one renders a
+blank title rather than a domain.
+
+→ *Not accepted:* the criterion is a hit rate on a dashboard, and the numbers
+are on `/health` rather than on one. The counters are per instance and reset
+with the container, which is the right first step and not the finished one —
+the alternative is a counters table written on the request path, buying
+durability by adding a write to the path the cache exists to make cheaper.
 
 **Parallel track — the eval harness.** The 200 labeled queries are a writing
 task, not a coding one; start them at step 0. The harness code lands at step 2.

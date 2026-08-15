@@ -1,5 +1,10 @@
+import type {
+	CachedDocument,
+	DocumentStore,
+} from "../../infra/db/document-store";
 import type { EgressClient } from "../../infra/egress/client";
 import { EgressError } from "../../infra/egress/errors";
+import { recordHit, recordMiss, recordRevalidated } from "../../shared/metrics";
 import {
 	type Extraction,
 	type ExtractionFailure,
@@ -77,16 +82,73 @@ export type RetrieveOptions = {
 	 */
 	concurrency?: number;
 	minChars?: number;
+	/**
+	 * The content cache. Absent means every page is fetched, which is exactly
+	 * how this behaved before step 7 — the cache is an optimisation, never a
+	 * dependency, and a database that is down must not stop a search.
+	 */
+	cache?: DocumentStore;
 };
 
 const DEFAULT_CONCURRENCY = 6;
+
+/** A cached page, shaped as though it had just been fetched. */
+function fromCache(cached: CachedDocument): RetrievalOutcome {
+	return {
+		ok: true,
+		page: {
+			requestedUrl: cached.url,
+			finalUrl: cached.canonicalUrl,
+			domain: cached.domain,
+			status: cached.status,
+			extraction: cached.extraction,
+		},
+	};
+}
 
 async function retrieveOne(
 	url: string,
 	options: RetrieveOptions,
 ): Promise<RetrievalOutcome> {
+	/*
+	  Three outcomes, in cost order:
+
+	  - fresh in cache      → no request at all
+	  - stale with an etag  → one conditional request, and a 304 costs no body,
+	                          no extraction and no re-chunking
+	  - anything else       → the full fetch this function has always done
+
+	  The cached copy is held across the request so a 304 has something to
+	  return: the whole point of `If-None-Match` is that the response carries no
+	  body, so the body has to come from here.
+	*/
+	const cached = options.cache ? await options.cache.get(url) : null;
+
+	if (cached?.fresh) {
+		recordHit("content");
+		return fromCache(cached);
+	}
+
+	const conditional = cached?.etag
+		? { "if-none-match": cached.etag }
+		: undefined;
+
 	try {
-		const response = await options.client.fetch(url);
+		const response = await options.client.fetch(
+			url,
+			conditional ? { headers: conditional } : undefined,
+		);
+
+		// Unchanged since we last read it. Push the expiry out and serve what we
+		// already hold — this is the case the TTL exists to make cheap, not the
+		// case it exists to prevent.
+		if (response.status === 304 && cached) {
+			recordRevalidated("content");
+			await options.cache?.touch(cached.canonicalUrl);
+			return fromCache(cached);
+		}
+
+		recordMiss("content");
 
 		// A 404 or a 500 is a page that did not answer. Recorded as its own
 		// reason rather than an extraction failure, because a corpus full of
@@ -120,16 +182,28 @@ async function retrieveOne(
 			};
 		}
 
-		return {
-			ok: true,
-			page: {
-				requestedUrl: url,
-				finalUrl: response.url,
-				domain: new URL(response.url).hostname,
-				status: response.status,
-				extraction: result.extraction,
-			},
+		const page = {
+			requestedUrl: url,
+			finalUrl: response.url,
+			domain: new URL(response.url).hostname,
+			status: response.status,
+			extraction: result.extraction,
 		};
+
+		// Awaited rather than fired and forgotten. On Cloud Run a promise left
+		// running past the response is a promise the instance may be frozen in
+		// the middle of, so "fire and forget" quietly becomes "sometimes write".
+		// One insert against a warm pool is cheaper than that ambiguity.
+		await options.cache?.put({
+			requestedUrl: url,
+			finalUrl: response.url,
+			domain: page.domain,
+			status: response.status,
+			extraction: result.extraction,
+			etag: response.headers.etag ?? null,
+		});
+
+		return { ok: true, page };
 	} catch (error) {
 		return {
 			ok: false,

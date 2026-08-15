@@ -67,6 +67,44 @@ const schema = z
 			.default(8_000),
 
 		/* ---------------------------------------------------------------------
+	   Caching — step 7 of PLAN.md's build order.
+
+	   Two TTLs, and the gap between them is the design. A page's content
+	   mostly does not change; which pages a vendor names for a query moves
+	   continuously. One TTL for both would either re-fetch stable pages for
+	   nothing or serve a ranking from last week.
+	   ------------------------------------------------------------------- */
+
+		/**
+		 * How long a fetched page is served without asking the network.
+		 *
+		 * Seven days, and it is not the whole story: an expired document is
+		 * revalidated with `If-None-Match` rather than re-downloaded, so the
+		 * common case past this deadline still costs no bandwidth and no
+		 * extraction. The TTL decides when we *ask*, not when we discard.
+		 */
+		CONTENT_CACHE_TTL_MS: z.coerce
+			.number()
+			.int()
+			.positive()
+			.default(7 * 24 * 60 * 60 * 1_000),
+
+		/**
+		 * How long an upstream provider's URL list is reused. PLAN.md: "Rankings
+		 * move."
+		 *
+		 * Ten minutes. Long enough that a query repeated during one session — or
+		 * by the surface retrying — costs one vendor call, short enough that a
+		 * provider going bad becomes visible in minutes rather than staying
+		 * masked until the cache drains.
+		 */
+		QUERY_CACHE_TTL_MS: z.coerce
+			.number()
+			.int()
+			.positive()
+			.default(10 * 60 * 1_000),
+
+		/* ---------------------------------------------------------------------
 	   Upstream search — step 3 of PLAN.md's build order.
 
 	   Each credential is optional on its own; the refinement below requires at

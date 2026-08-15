@@ -28,6 +28,7 @@ substitutions:
   # search-api@${PROJECT_ID}...", which looks like a missing IAM grant rather
   # than an unexpanded variable.
   _SERVICE_ACCOUNT_NAME: search-api
+  _MIGRATE_JOB: search-api-migrate
   _MIN_INSTANCES: "0"
   _MAX_INSTANCES: "4"
   # Cloud Run reaches Cloud SQL over a unix socket mounted into the container,
@@ -73,6 +74,39 @@ steps:
       - push
       - --all-tags
       - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}
+
+  # ---------------------------------------------------------------------------
+  # Migrate, BEFORE the deploy.
+  #
+  # This step did not exist until step 7 needed it, and its absence was the kind
+  # that hides: `web.documents` and `web.query_cache` were created by 0001 and
+  # never read, so no deploy had ever depended on a migration having run. The
+  # caches change that — and because every store swallows its own errors and
+  # degrades to a miss, a missing column would not fail the deploy or the
+  # request. It would produce a permanent 0% hit rate that looks exactly like a
+  # cold cache.
+  #
+  # Same shape as apps/server: `jobs deploy` is create-or-update, so a fresh
+  # project needs no bootstrap, and `execute --wait` makes a failed migration
+  # fail the build before any revision is created.
+  # ---------------------------------------------------------------------------
+  - id: migrate
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        gcloud run jobs deploy ${_MIGRATE_JOB} \
+          --image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}:${BUILD_ID} \
+          --region=${_REGION} \
+          --service-account=${_SERVICE_ACCOUNT_NAME}@${PROJECT_ID}.iam.gserviceaccount.com \
+          --set-cloudsql-instances=${PROJECT_ID}:${_REGION}:${_SQL_INSTANCE_NAME} \
+          --set-secrets=DATABASE_URL=search-database-url:latest \
+          --command=node --args=dist/migrate.js \
+          --max-retries=0 \
+          --task-timeout=600s
+        gcloud run jobs execute ${_MIGRATE_JOB} --region=${_REGION} --wait
 
   - id: deploy
     name: gcr.io/google.com/cloudsdktool/cloud-sdk
@@ -122,6 +156,6 @@ steps:
       # to be sending it. That order is the whole of the sequencing: enabling it
       # first would 401 every real request. `/health` stays outside the gate so
       # Cloud Run's probes, which carry no headers, keep passing.
-      - --set-secrets=DATABASE_URL=search-database-url:latest,TAVILY_API_KEY=search-tavily-api-key:latest,ANYSEARCH_API_KEY=search-anysearch-api-key:latest,COMPOSER_API_KEY=search-composer-api-key:latest,SEARCH_API_TOKEN=search-api-token:latest,SEARCH_API_TOKEN=search-api-token:latest
+      - --set-secrets=DATABASE_URL=search-database-url:latest,TAVILY_API_KEY=search-tavily-api-key:latest,ANYSEARCH_API_KEY=search-anysearch-api-key:latest,COMPOSER_API_KEY=search-composer-api-key:latest,SEARCH_API_TOKEN=search-api-token:latest
 
 timeout: 900s

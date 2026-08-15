@@ -1,3 +1,5 @@
+import type { DocumentStore } from "../infra/db/document-store";
+import type { QueryLog } from "../infra/db/query-log";
 import type { EgressClient } from "../infra/egress/client";
 import type { SearchRotation } from "../infra/upstream/rotation";
 import type { Candidate } from "../infra/upstream/types";
@@ -31,6 +33,14 @@ export type PipelineDeps = {
 	egress: EgressClient;
 	composer: Composer;
 	classifier: Classifier;
+	/**
+	 * The permanent demand record. Optional — a search must not fail because
+	 * the log could not be written, and the pipeline ran without one for its
+	 * whole life before step 7.
+	 */
+	queryLog?: QueryLog;
+	/** The content cache, threaded through to the fetch stage. */
+	documents?: DocumentStore;
 	/** Candidate URLs requested from the upstream provider. */
 	candidateLimit?: number;
 	/** Passages kept for composition. */
@@ -305,7 +315,7 @@ export async function* runPipeline(
 
 		const { outcomes, stats } = await retrievePages(
 			candidates.map((candidate) => candidate.url),
-			{ client: deps.egress },
+			{ client: deps.egress, cache: deps.documents },
 		);
 		if (aborted()) return;
 
@@ -341,6 +351,24 @@ export async function* runPipeline(
 		if (aborted()) return;
 
 		const sources = sourcesFrom(passages);
+
+		/*
+		  Logged here, once we know which domains actually answered.
+
+		  Not at the top of the pipeline, where only the query is known: the
+		  demand signal PLAN.md wants is "what was asked *and* what answered it",
+		  and a row written before retrieval could only ever hold half of it.
+
+		  Deliberately not awaited. This is the one write in the request path
+		  that no caller is waiting on, and putting a database round trip between
+		  the sources and the first answer block would spend the latency the
+		  event ordering exists to protect. It cannot reject — the store swallows
+		  its own errors — so there is nothing to catch.
+		*/
+		void deps.queryLog?.record(
+			query,
+			sources.map((source) => source.domain),
+		);
 
 		// Before composition, always. This is property 1 above, and it is the
 		// only place in the pipeline where the order is a decision rather than a
