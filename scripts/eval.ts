@@ -218,6 +218,15 @@ function domainRecall(results: Result[]): Metric {
 	return ratio(total, labelled.length);
 }
 
+/**
+ * Failures nobody intends to fix.
+ *
+ * A `401`, `403` or `451` is a site declining to serve an identified bot.
+ * PLAN.md refuses to spoof a browser user agent to get around that, so these
+ * are a category we accept rather than a number we drive down.
+ */
+const NOT_OURS = new Set(["refused-by-site"]);
+
 /** Phase 0 gate: > 0.90. Exact, from the pipeline rather than a stage label. */
 function extractionRate(results: Result[]): Metric {
 	const withStats = results.filter((r) => r.retrieval);
@@ -230,6 +239,38 @@ function extractionRate(results: Result[]): Metric {
 		extracted += (result.retrieval as RetrievalStats).extracted;
 	}
 	return ratio(extracted, requested, "pages, pooled");
+}
+
+/**
+ * The same rate over pages we were actually allowed to read.
+ *
+ * **This is the number to work against**, and the raw rate is the one to
+ * report. PLAN.md said the 0.90 gate "needs redefining before it can be met,
+ * and not by improving extraction" — this is that redefinition, with a
+ * measurement behind it: on the seed set, 42% of failures are sites refusing an
+ * identified bot. Chasing the raw rate means either accepting a target that
+ * cannot be hit or spoofing a user agent to hit it, and the second is refused.
+ *
+ * Keeping both visible matters. The raw rate is what a reader of the answer
+ * experiences — a refused page is still a page missing from the answer — while
+ * this one is what an engineer can move.
+ */
+function addressableExtraction(results: Result[]): Metric {
+	const withStats = results.filter((r) => r.retrieval);
+	if (withStats.length === 0) return ratio(0, 0);
+
+	let requested = 0;
+	let extracted = 0;
+	for (const result of withStats) {
+		const stats = result.retrieval as RetrievalStats;
+		const refused = Object.entries(stats.failures)
+			.filter(([reason]) => NOT_OURS.has(reason))
+			.reduce((n, [, count]) => n + count, 0);
+
+		requested += stats.requested - refused;
+		extracted += stats.extracted;
+	}
+	return ratio(extracted, requested, "readable pages");
 }
 
 /**
@@ -277,6 +318,19 @@ function mentionRate(results: Result[]): Metric {
  * that always produces a confident paragraph is not answering; it is
  * generating, and this is the only check in the set that can tell.
  */
+/** Every named failure reason, most common first. */
+function failureBreakdown(results: Result[]): [string, number][] {
+	const counts = new Map<string, number>();
+	for (const result of results) {
+		for (const [reason, n] of Object.entries(
+			result.retrieval?.failures ?? {},
+		)) {
+			counts.set(reason, (counts.get(reason) ?? 0) + n);
+		}
+	}
+	return [...counts.entries()].sort((a, b) => b[1] - a[1]);
+}
+
 /** Macro-averaged over queries that produced a judgeable verdict. */
 function faithfulness(results: Result[]): Metric {
 	const judged = results.filter(
@@ -375,11 +429,35 @@ async function main(): Promise<void> {
 
 	console.log("\n── Per stage ──────────────────────────────────────────────");
 	console.log(row("routing accuracy", routingAccuracy(results)));
-	console.log(row("extraction rate", extractionRate(results), 0.9));
+	console.log(row("extraction rate", extractionRate(results)));
+	console.log(row("  ↳ addressable", addressableExtraction(results), 0.9));
 	console.log(row("domain recall", domainRecall(results)));
 	console.log(row("citation validity", citationValidity(results), 1));
 	console.log(row("must-mention", mentionRate(results)));
 	console.log(row("restraint on empty", restraint(results)));
+
+	/*
+	  The composition of the failures, not just the rate.
+
+	  PLAN.md argues the 0.90 gate "needs redefining before it can be met, and
+	  not by improving extraction": a `403` is a site declining to be read by an
+	  identified bot, and spoofing a browser user agent to get past it is
+	  refused. A single percentage cannot tell a fixable parser bug from a
+	  deliberate refusal, and only one of those is worth engineering time.
+	*/
+	const failures = failureBreakdown(results);
+	if (failures.length > 0) {
+		console.log(
+			"\n── Why pages did not extract ──────────────────────────────",
+		);
+		const total = failures.reduce((n, [, count]) => n + count, 0);
+		for (const [reason, count] of failures) {
+			const share = ((count / total) * 100).toFixed(0).padStart(3);
+			console.log(
+				`    ${reason.padEnd(22)} ${String(count).padStart(3)}  ${share}%`,
+			);
+		}
+	}
 
 	if (useJudge) {
 		console.log(

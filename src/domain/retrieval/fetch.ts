@@ -42,6 +42,40 @@ export type RetrievedPage = {
 	extraction: Extraction;
 };
 
+/**
+ * Why an HTTP response was not a page we could read.
+ *
+ * These were one bucket called `http-error`, which made 40% of the eval
+ * harness's failures unreadable: it could not tell a site declining to be read
+ * from a URL the upstream provider invented. They are different problems with
+ * different owners, and only some are ours.
+ *
+ * - `refused-by-site` — 401, 403, 451. A site declining to serve an identified
+ *   bot. **Not a bug and deliberately not fixed**: PLAN.md refuses to spoof a
+ *   browser user agent to get around it, so this is a category we accept rather
+ *   than a number we drive down.
+ * - `not-found` — 404, 410. The URL does not exist. That is a *provider*
+ *   quality signal: the index handed us something stale.
+ * - `rate-limited` — 429. Ours, and the only one that says slow down.
+ * - `server-error` — 5xx. Theirs, transient, and worth retrying another day
+ *   rather than treating as a permanent property of the page.
+ */
+export type HttpFailure =
+	| "refused-by-site"
+	| "not-found"
+	| "rate-limited"
+	| "server-error"
+	| "http-error";
+
+export function httpFailure(status: number): HttpFailure {
+	if (status === 401 || status === 403 || status === 451)
+		return "refused-by-site";
+	if (status === 404 || status === 410) return "not-found";
+	if (status === 429) return "rate-limited";
+	if (status >= 500) return "server-error";
+	return "http-error";
+}
+
 export type RetrievalOutcome =
 	| { ok: true; page: RetrievedPage }
 	| {
@@ -51,7 +85,7 @@ export type RetrievalOutcome =
 			finalUrl?: string;
 			domain?: string;
 			/** An egress refusal, an HTTP status, or an extraction failure. */
-			reason: ExtractionFailure | "http-error" | string;
+			reason: ExtractionFailure | HttpFailure | string;
 			detail: string;
 			/**
 			 * What the page said about itself, when it parsed but could not be read.
@@ -150,17 +184,17 @@ async function retrieveOne(
 
 		recordMiss("content");
 
-		// A 404 or a 500 is a page that did not answer. Recorded as its own
-		// reason rather than an extraction failure, because a corpus full of
-		// `http-error` says something different about the upstream provider than
-		// one full of `javascript-shell`.
+		// A page that did not answer, named by *why* rather than by status.
+		// A corpus full of these says something different about the upstream
+		// provider than one full of `javascript-shell` — and the four kinds
+		// below say different things again. See `httpFailure`.
 		if (response.status >= 400) {
 			return {
 				ok: false,
 				requestedUrl: url,
 				finalUrl: response.url,
 				domain: new URL(response.url).hostname,
-				reason: "http-error",
+				reason: httpFailure(response.status),
 				detail: `status ${response.status}`,
 			};
 		}

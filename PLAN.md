@@ -464,16 +464,37 @@ prerequisite.
 | Metric | First measurement | Bar |
 |---|---|---|
 | routing accuracy | 100% (n=9) | — |
-| **extraction rate** | **59.0%** (n=78 pages) | **>0.90** |
+| extraction rate, raw | 60.3% (n=78 pages) | — |
+| **extraction, addressable** | **71.2%** (n=66 readable) | **>0.90** |
 | citation validity | 100% (n=47) | 1.0 |
 | **restraint on unanswerable** | **0%** (n=1) | — |
 | citation faithfulness *(judged)* | 100% (n=3) | >0.95 |
 | answer correctness *(judged)* | 100% (n=3) | >0.80 |
 
-- **Extraction is failing its gate by a wide margin — 59% against 90%.** Step 4
-  is marked accepted on a caveat about JavaScript shells, and this is that
-  caveat with a number on it. It is the single largest quality lever measured
-  so far, and it was invisible before today.
+- **Extraction is failing its gate — but by less than it first appeared, and
+  for a reason that changes what to do about it.** The first measurement said
+  59% against a 90% bar. Naming the HTTP failures by cause rather than lumping
+  them as `http-error` showed that **39% of failures are `refused-by-site`** —
+  401/403/451 from sites declining to serve an identified bot.
+
+  This is exactly what step 4 predicted: *"The 0.90 gate needs redefining
+  before it can be met, and not by improving extraction."* Spoofing a browser
+  user agent would move the number and is refused, so the gate now measures
+  **addressable** extraction — pages we were allowed to read — and both figures
+  are reported. The raw rate is what a reader experiences; the addressable one
+  is what an engineer can move.
+
+  | reason | share | ours? |
+  |---|---|---|
+  | `refused-by-site` | 39% | no — policy, not a bug |
+  | `no-main-content` | 23% | **yes** |
+  | `too-short` | 16% | **yes** |
+  | `javascript-shell` | 10% | only with a headless browser |
+  | the rest | 12% | mixed |
+
+  **`no-main-content` and `too-short` are the work** — 39% of failures between
+  them, and the only two buckets large enough to move the addressable rate from
+  71% toward 90%.
 - **A nonsense query produced three sources and a three-block answer.**
   `empty-nonsense` asks about a specification that does not exist and got a
   confident composition. This is the failure a set without unanswerable queries

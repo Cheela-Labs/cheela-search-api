@@ -135,7 +135,9 @@ describe("retrievePages", () => {
 		expect(Object.keys(stats.failures).sort()).toEqual(
 			[
 				"blocked-address",
-				"http-error",
+				// The fixture answers 500, so this is theirs and transient —
+				// distinct from a 404, which would indict the URL we were given.
+				"server-error",
 				"invalid-url",
 				"scheme-not-allowed",
 			].sort(),
@@ -143,7 +145,7 @@ describe("retrievePages", () => {
 	});
 
 	it("counts an HTTP error apart from an extraction failure", async () => {
-		// The distinction matters: a corpus full of `http-error` indicts the
+		// The distinction matters: a corpus full of `not-found` indicts the
 		// upstream provider's URLs, one full of `javascript-shell` indicts the
 		// extractor.
 		const port = await serve((request, response) => {
@@ -163,8 +165,40 @@ describe("retrievePages", () => {
 			{ client: client() },
 		);
 
-		expect(stats.failures["http-error"]).toBe(1);
+		expect(stats.failures["not-found"]).toBe(1);
 		expect(stats.failures["javascript-shell"]).toBe(1);
+	});
+
+	/**
+	 * The four kinds of HTTP failure, which were one bucket.
+	 *
+	 * They have different owners: a 403 is a site declining to serve an
+	 * identified bot and PLAN.md refuses to spoof around it, a 404 is the
+	 * upstream provider handing us a stale URL, a 429 is ours, and a 503 is
+	 * theirs and transient. One name for all four made 40% of the eval
+	 * harness's failures unreadable.
+	 */
+	it("names an HTTP failure by cause, not by number", async () => {
+		const port = await serve((request, response) => {
+			const status = Number(request.url?.slice(1) ?? "500");
+			response.writeHead(status);
+			response.end();
+		});
+
+		const { stats } = await retrievePages(
+			[
+				`http://a.invalid:${port}/403`,
+				`http://a.invalid:${port}/404`,
+				`http://a.invalid:${port}/429`,
+				`http://a.invalid:${port}/503`,
+			],
+			{ client: client() },
+		);
+
+		expect(stats.failures["refused-by-site"]).toBe(1);
+		expect(stats.failures["not-found"]).toBe(1);
+		expect(stats.failures["rate-limited"]).toBe(1);
+		expect(stats.failures["server-error"]).toBe(1);
 	});
 
 	it("fetches a repeated URL once", async () => {
