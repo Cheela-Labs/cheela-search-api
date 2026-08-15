@@ -448,8 +448,39 @@ with the container, which is the right first step and not the finished one —
 the alternative is a counters table written on the request path, buying
 durability by adding a write to the path the cache exists to make cheaper.
 
-**Parallel track — the eval harness.** The 200 labeled queries are a writing
-task, not a coding one; start them at step 0. The harness code lands at step 2.
+**Parallel track — the eval harness.** — *harness done 2026-08-15; the query
+set is 10 of 200.* `scripts/eval.ts`, `scripts/judge.ts`, `eval/queries.jsonl`.
+The 200 labeled queries are a writing task, not a coding one; start them at
+step 0. The harness code lands at step 2.
+
+**Every label is optional except the query**, so a half-labelled set still
+measures something and each metric reports the `n` it was computed over. A
+metric over four queries says `n=4` rather than speaking for the set. That is
+what makes filling the set in incrementally worth doing rather than a
+prerequisite.
+
+**Two findings on the first full run, both real:**
+
+| Metric | First measurement | Bar |
+|---|---|---|
+| routing accuracy | 100% (n=9) | — |
+| **extraction rate** | **59.0%** (n=78 pages) | **>0.90** |
+| citation validity | 100% (n=47) | 1.0 |
+| **restraint on unanswerable** | **0%** (n=1) | — |
+| citation faithfulness *(judged)* | 100% (n=3) | >0.95 |
+| answer correctness *(judged)* | 100% (n=3) | >0.80 |
+
+- **Extraction is failing its gate by a wide margin — 59% against 90%.** Step 4
+  is marked accepted on a caveat about JavaScript shells, and this is that
+  caveat with a number on it. It is the single largest quality lever measured
+  so far, and it was invisible before today.
+- **A nonsense query produced three sources and a three-block answer.**
+  `empty-nonsense` asks about a specification that does not exist and got a
+  confident composition. This is the failure a set without unanswerable queries
+  cannot see at all, and it is why one is in the seed.
+
+Neither number is trustworthy at n=10. Both are large enough that the shape is
+not in doubt.
 Every stage here has a plausible-sounding improvement that makes end-to-end
 quality worse — a better embedding model that loses proper nouns, a cheaper
 extractor that drops the answer. Without per-stage measurement you will ship all

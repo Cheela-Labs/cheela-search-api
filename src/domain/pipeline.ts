@@ -6,7 +6,11 @@ import type { Candidate } from "../infra/upstream/types";
 import type { Place, SearchEvent } from "../shared/events";
 import type { Composer } from "./compose/types";
 import { sourcesFrom, swatchFor } from "./compose/types";
-import { type RetrievalOutcome, retrievePages } from "./retrieval/fetch";
+import {
+	type RetrievalOutcome,
+	type RetrievalStats,
+	retrievePages,
+} from "./retrieval/fetch";
 import { selectPassages } from "./retrieval/rank";
 import type { Classifier } from "./route/classifier";
 import { routeStructurally } from "./route/structural";
@@ -41,6 +45,20 @@ export type PipelineDeps = {
 	queryLog?: QueryLog;
 	/** The content cache, threaded through to the fetch stage. */
 	documents?: DocumentStore;
+	/**
+	 * A measurement seam for the eval harness. Never affects behaviour.
+	 *
+	 * Extraction success rate is one of the four Phase 0 gate metrics
+	 * (>0.90), and the only other way to read it is to parse
+	 * `Read N relevant pages` out of a human-facing stage label — a gate
+	 * number should not depend on the wording of a UI string. The stats are
+	 * already computed here; this hands them to a caller that asked.
+	 *
+	 * Not an event, deliberately: `SearchEvent` is a wire contract that
+	 * `apps/search-web` duplicates and `test/app.test.ts` asserts on the bytes,
+	 * and a measurement detail has no business in it.
+	 */
+	onRetrieval?: (stats: RetrievalStats) => void;
 	/** Candidate URLs requested from the upstream provider. */
 	candidateLimit?: number;
 	/** Passages kept for composition. */
@@ -318,6 +336,7 @@ export async function* runPipeline(
 			{ client: deps.egress, cache: deps.documents },
 		);
 		if (aborted()) return;
+		deps.onRetrieval?.(stats);
 
 		const pages = outcomes.flatMap((outcome) =>
 			outcome.ok ? [outcome.page] : [],
