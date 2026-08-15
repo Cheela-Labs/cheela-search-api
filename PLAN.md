@@ -432,6 +432,16 @@ fallen back to bare hostnames. And a null title round-tripped through
 `text[]` as `""`, which `??` does not treat as absent — that one renders a
 blank title rather than a domain.
 
+→ **The migrate step earned itself on its first run.** `src/migrate.ts`
+imported `shared/config`, which validates the *service's* environment — so
+applying a schema change refused to start with `TAVILY_API_KEY: no upstream
+search provider is configured`. The job is given `DATABASE_URL` and nothing
+else, correctly: a migration needs a database, not a search vendor. It reads
+that one variable directly now. Handing the job every runtime secret would have
+been the wrong fix twice — it widens what a schema change can reach, and it
+makes any new required variable silently break migrations until somebody
+remembers the job.
+
 → *Not accepted:* the criterion is a hit rate on a dashboard, and the numbers
 are on `/health` rather than on one. The counters are per instance and reset
 with the container, which is the right first step and not the finished one —
