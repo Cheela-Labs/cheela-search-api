@@ -4,6 +4,10 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createApp } from "../src/app";
 import { extractiveComposer } from "../src/domain/compose/extractive";
 import type { Composer } from "../src/domain/compose/types";
+import type {
+	CapabilityStore,
+	SiteCapability,
+} from "../src/infra/db/capability-store";
 import { createEgressClient } from "../src/infra/egress/client";
 import { createRotation } from "../src/infra/upstream/rotation";
 import {
@@ -373,5 +377,117 @@ describe("pipeline · discovery", () => {
 
 		const events = await collect(await app.request("/search?q=cold%20start"));
 		expect(events.map((event) => event.type)).not.toContain("places");
+	});
+});
+
+/**
+ * Capability chips, on both answer paths.
+ *
+ * This exists because the two paths had silently disagreed. The capability
+ * lookup lived inline in the long path, and the navigational shortcut returned
+ * its source before reaching it — so typing a site's own address, the query
+ * most likely to mean "what can this site do?", was the one query that could
+ * never show a capability. Nothing failed; the short path just ended earlier.
+ *
+ * Both are asserted here, against the same fake, because a single shared
+ * `attachCapabilities` is only half the fix: the other half is a test that
+ * fails if either path stops calling it.
+ */
+describe("capability chips", () => {
+	const capability = (name: string, over: Partial<SiteCapability> = {}) =>
+		({
+			domain: "demo-calender.cheelalabs.com",
+			name,
+			invocationName: name,
+			description: null,
+			effects: "read",
+			invocableByUs: true,
+			...over,
+		}) as SiteCapability;
+
+	/** Records what it was asked, so the enqueue can be asserted too. */
+	function fakeCapabilities(rows: SiteCapability[]) {
+		const enqueued: string[][] = [];
+		const asked: string[][] = [];
+		const store = {
+			async capabilitiesFor(domains: readonly string[]) {
+				asked.push([...domains]);
+				const map = new Map<string, SiteCapability[]>();
+				for (const row of rows) {
+					map.set(row.domain, [...(map.get(row.domain) ?? []), row]);
+				}
+				// Only what was asked for, like the real indexed statement.
+				return new Map([...map].filter(([domain]) => domains.includes(domain)));
+			},
+			async enqueue(domains: readonly string[]) {
+				enqueued.push([...domains]);
+			},
+		} as unknown as CapabilityStore;
+		return { store, enqueued, asked };
+	}
+
+	/**
+	 * The reported bug: `demo-calender.cheelalabs.com` returned a source with no
+	 * chips, because a hostname-shaped query takes the shortcut.
+	 */
+	it("attaches them on the navigational shortcut", async () => {
+		const fake = fakeCapabilities([
+			capability("calendar-create-event"),
+			capability("calendar-find-free-time"),
+		]);
+
+		const app = createApp({ capabilities: fake.store });
+		const events = await collect(
+			await app.request("/search?q=demo-calender.cheelalabs.com"),
+		);
+
+		const source = events.find((event) => event.type === "source");
+		expect(source).toBeDefined();
+		const carried = (source as { source: { capabilities?: unknown[] } }).source
+			.capabilities;
+		expect(carried).toHaveLength(2);
+		expect(carried?.[0]).toMatchObject({
+			domain: "demo-calender.cheelalabs.com",
+			invocationName: "calendar-create-event",
+			effects: "read",
+			callable: true,
+		});
+	});
+
+	it("asks about the domain the reader actually typed", async () => {
+		const fake = fakeCapabilities([]);
+		const app = createApp({ capabilities: fake.store });
+		await collect(await app.request("/search?q=demo-calender.cheelalabs.com"));
+
+		expect(fake.asked).toEqual([["demo-calender.cheelalabs.com"]]);
+		// Queued for a probe, so a domain we have never seen is indexed for next
+		// time rather than staying invisible forever.
+		expect(fake.enqueued).toEqual([["demo-calender.cheelalabs.com"]]);
+	});
+
+	it("leaves the source alone when the domain has none", async () => {
+		const fake = fakeCapabilities([]);
+		const app = createApp({ capabilities: fake.store });
+		const events = await collect(await app.request("/search?q=example.com"));
+
+		const source = events.find((event) => event.type === "source");
+		// Absent, not an empty array: the surface renders a card without a chip
+		// row rather than an empty one.
+		expect(
+			(source as { source: { capabilities?: unknown[] } }).source.capabilities,
+		).toBeUndefined();
+	});
+
+	/**
+	 * A navigational answer must still work with no index configured at all —
+	 * every store in this pipeline is optional and degrades to absent.
+	 */
+	it("answers normally when no capability store is configured", async () => {
+		const app = createApp({});
+		const events = await collect(
+			await app.request("/search?q=demo-calender.cheelalabs.com"),
+		);
+		expect(events.map((e) => e.type)).toContain("source");
+		expect(events.map((e) => e.type)).toContain("done");
 	});
 });

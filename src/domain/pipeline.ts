@@ -7,7 +7,7 @@ import type { QueryLog } from "../infra/db/query-log";
 import type { EgressClient } from "../infra/egress/client";
 import type { SearchRotation } from "../infra/upstream/rotation";
 import { type Candidate, interleaveAll } from "../infra/upstream/types";
-import type { Place, SearchEvent } from "../shared/events";
+import type { Place, SearchEvent, Source } from "../shared/events";
 import type { Composer } from "./compose/types";
 import { sourcesFrom, swatchFor } from "./compose/types";
 import {
@@ -212,14 +212,72 @@ function placesFrom(
 }
 
 /**
+ * Attaches the capability index to whichever sources this answer produced.
+ *
+ * One function, used by **both** answer paths, because they had drifted: the
+ * navigational shortcut returned its source without ever consulting the index,
+ * so typing a site's own address — the query most likely to mean "what can this
+ * site do?" — was the single path that could never show a capability. The bug
+ * was invisible in the code because the lookup lived inline in the long path
+ * and the short path simply ended earlier.
+ *
+ * The read is one indexed statement for every domain at once. The write is
+ * `INSERT ... DO NOTHING`, noting that these domains exist so the probe job can
+ * look at them later — the opportunistic source PLAN.md prefers, "weighted by
+ * what people actually search for, which beats any static ranking list".
+ *
+ * Neither fetches anything. A domain seen for the first time contributes no
+ * chips to *this* answer and may contribute some to the next one.
+ */
+async function attachCapabilities(
+	sources: readonly Source[],
+	capabilities: CapabilityStore | undefined,
+): Promise<void> {
+	if (!capabilities || sources.length === 0) return;
+
+	const domains = [...new Set(sources.map((source) => source.domain))];
+	const known: Map<string, SiteCapability[]> =
+		await capabilities.capabilitiesFor(domains);
+
+	// Not awaited. Nobody is waiting on it, it swallows its own errors, and
+	// putting a write between the sources and the first answer block would
+	// spend the latency the event ordering exists to protect.
+	void capabilities.enqueue(domains);
+
+	for (const source of sources) {
+		const found = known.get(source.domain) ?? [];
+		if (found.length === 0) continue;
+		source.capabilities = found.map((capability) => ({
+			domain: capability.domain,
+			// The spec allows `invocationName` to be absent; the wire type does
+			// not, so fall back to the identity rather than dropping a real
+			// capability over a presentation field.
+			invocationName: capability.invocationName ?? capability.name,
+			effects: capability.effects,
+			callable: capability.invocableByUs,
+		}));
+	}
+}
+
+/**
  * The navigational answer: the site, and nothing else.
  *
  * No upstream call, no fetch, no rerank, no model — roughly 350 ms and no cost,
  * against ~2.6 s and eight page fetches for a query that wanted one link. The
  * page is not read, so there is nothing to cite and nothing is claimed about
  * what it says.
+ *
+ * **It does still ask the capability index**, and that is worth the one indexed
+ * statement it costs. This is the query where an action layer is most obviously
+ * the answer: somebody who typed `demo-calender.cheelalabs.com` wants that
+ * site, and what the site can *do* is the most useful thing we know about it
+ * that a plain link does not carry. Skipping the lookup here saved ~38 ms on
+ * the one query whose whole value it is.
  */
-async function* navigational(url: string): AsyncGenerator<SearchEvent> {
+async function* navigational(
+	url: string,
+	capabilities: CapabilityStore | undefined,
+): AsyncGenerator<SearchEvent> {
 	const { hostname } = new URL(url);
 
 	yield {
@@ -227,19 +285,24 @@ async function* navigational(url: string): AsyncGenerator<SearchEvent> {
 		stage: { id: "route", state: "done", label: `Going to ${hostname}` },
 	};
 	yield { type: "crawled", count: 0 };
-	yield {
-		type: "source",
-		source: {
-			id: "nav",
-			n: 1,
-			domain: hostname,
-			path: hostname,
-			url,
-			title: hostname,
-			swatch: swatchFor(hostname),
-			passages: [],
-		},
+
+	const source: Source = {
+		id: "nav",
+		n: 1,
+		domain: hostname,
+		path: hostname,
+		url,
+		title: hostname,
+		swatch: swatchFor(hostname),
+		passages: [],
 	};
+
+	// Before the source is emitted, not after: the surface renders the card once
+	// and the chips are part of it. An event stream cannot revise a card it has
+	// already sent.
+	await attachCapabilities([source], capabilities);
+
+	yield { type: "source", source };
 	yield {
 		type: "block",
 		block: {
@@ -273,7 +336,7 @@ export async function* runPipeline(
 		const structural = routeStructurally(query);
 		if (structural.intent === "navigational") {
 			yield { type: "intent", intent: "navigational" };
-			yield* navigational(structural.url);
+			yield* navigational(structural.url, deps.capabilities);
 			return;
 		}
 
@@ -428,29 +491,7 @@ export async function* runPipeline(
 		  Neither fetches anything. A domain seen for the first time contributes
 		  no chips to *this* answer and may contribute some to the next one.
 		*/
-		const domains = [...new Set(sources.map((source) => source.domain))];
-		const known: Map<string, SiteCapability[]> = deps.capabilities
-			? await deps.capabilities.capabilitiesFor(domains)
-			: new Map();
-
-		// Not awaited. Nobody is waiting on it, it swallows its own errors, and
-		// putting a write between the sources and the first answer block would
-		// spend the latency the event ordering exists to protect.
-		void deps.capabilities?.enqueue(domains);
-
-		for (const source of sources) {
-			const found = known.get(source.domain) ?? [];
-			if (found.length === 0) continue;
-			source.capabilities = found.map((capability) => ({
-				domain: capability.domain,
-				// The spec allows `invocationName` to be absent; the wire type does
-				// not, so fall back to the identity rather than dropping a real
-				// capability over a presentation field.
-				invocationName: capability.invocationName ?? capability.name,
-				effects: capability.effects,
-				callable: capability.invocableByUs,
-			}));
-		}
+		await attachCapabilities(sources, deps.capabilities);
 
 		/*
 		  Logged here, once we know which domains actually answered.
