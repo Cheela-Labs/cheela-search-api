@@ -123,6 +123,24 @@ above 0.85, measured" are different claims and only one can gate the next thing.
 | 9 | Crawl scheduler on Cloud Scheduler | Frontier and priority built; **not scheduled** |
 | 10 | BigQuery analytics, monitoring dashboard | **Not built** |
 
+### The migration is destructive, on purpose
+
+`0001_metadata_plane.sql` begins by dropping the previous application's `web`
+schema and, when it detects the old shape, its `capability` tables. That is
+correct — the app that owned them was deleted and their contents were caches or
+an index Vespa now holds — and it is a migration rather than a runbook step
+because production shares the database and a manual step nobody performs is a
+bug that ships.
+
+The ordering is load-bearing and cost two bugs to learn. `CREATE TABLE IF NOT
+EXISTS` protects against a table already being *there*, never against it being
+*wrong*: with the teardown after the creates, the old `capability.capabilities`
+survived under the same name with a different shape and the migration reported
+success, failing later on the first insert; and `CREATE INDEX ... (next_probe_at)`
+against the old `sites` table aborted the whole migration. Both paths are covered
+by `test/db/migrate.test.ts`, which builds the previous app's real schema and
+migrates over it.
+
 ### What is measurable but unmeasured
 
 `pnpm eval` reports every gate below. None has been run against the real

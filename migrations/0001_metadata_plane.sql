@@ -8,6 +8,53 @@
 -- Nothing here is on the request path except `capability.capabilities`, which
 -- is joined by domain to decorate results, and that join is by primary key.
 
+-- ---------------------------------------------------------------------------
+-- First, remove the application this one replaced.
+--
+-- **This destroys data**, and it is correct to: the app that owned it was
+-- deleted, and everything in it was either a cache or an index Vespa now holds.
+-- It is a migration rather than a runbook step because production has the same
+-- database and a manual step nobody performs is a bug that ships.
+--
+-- It has to come *before* the creates below, and that ordering is the whole
+-- point. Two ways this goes wrong when the teardown comes after:
+--
+--   1. `CREATE TABLE IF NOT EXISTS capability.capabilities` finds the old table
+--      — same name, entirely different shape, keyed on `manifest_id` with no
+--      `cap_id`, `title`, `provider` or `callable` — and does what it says: it
+--      keeps it. The migration reports success and nothing fails until the first
+--      insert, in production, as a 500 that looks like application code.
+--   2. Worse and louder: `CREATE INDEX ... ON capability.sites (next_probe_at)`
+--      runs against the *old* sites table, which has no such column, and the
+--      whole migration fails. The deploy is blocked, which is the better of the
+--      two outcomes and still an outage nobody expected.
+--
+-- `IF NOT EXISTS` protects against a table already being *there*. It has never
+-- protected against it being *wrong*.
+-- ---------------------------------------------------------------------------
+
+DROP SCHEMA IF EXISTS web CASCADE;
+
+DO $$
+BEGIN
+	-- Keyed on a column only the previous shape had, so a fresh database and a
+	-- re-run both fall through untouched.
+	IF EXISTS (
+		SELECT 1 FROM information_schema.columns
+		 WHERE table_schema = 'capability'
+		   AND table_name = 'capabilities'
+		   AND column_name = 'manifest_id'
+	) THEN
+		RAISE NOTICE 'previous capability schema detected; replacing it';
+		-- CASCADE because manifests references sites and capabilities references
+		-- both; dropping them in dependency order by hand is one more thing to
+		-- get wrong on a database nobody is watching.
+		DROP TABLE IF EXISTS capability.capabilities CASCADE;
+		DROP TABLE IF EXISTS capability.manifests CASCADE;
+		DROP TABLE IF EXISTS capability.sites CASCADE;
+	END IF;
+END $$;
+
 CREATE SCHEMA IF NOT EXISTS search;
 CREATE SCHEMA IF NOT EXISTS graph;
 CREATE SCHEMA IF NOT EXISTS capability;
