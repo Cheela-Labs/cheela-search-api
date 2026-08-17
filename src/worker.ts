@@ -8,9 +8,11 @@ import {
 	ensureGroup,
 } from "./infra/redis/index.js";
 import { vespa } from "./infra/vespa/client.js";
-import { createIndexer } from "./services/indexer/index.js";
+import { enqueue } from "./services/crawler/index.js";
+import { createIndexer, priorAuthority } from "./services/indexer/index.js";
 import { createGraph, entityId } from "./services/knowledge-graph/index.js";
 import { logger } from "./shared/logger.js";
+import { domainOf } from "./shared/normalize.js";
 import { startTelemetry } from "./shared/telemetry.js";
 
 /**
@@ -49,15 +51,53 @@ const graph = createGraph({ pool });
 
 let running = true;
 
+/** How many URLs one event may index inline before the rest are deferred. */
+const INLINE_BUDGET = 10;
+
 async function handleSearchExecuted(urls: string[]): Promise<void> {
+	// Anything past the budget goes to the frontier rather than being dropped.
+	//
+	// This is also what puts anything in the frontier at all: the crawl scheduler
+	// ranks and promotes rows, and until this existed it ranked an empty table
+	// hourly. A URL a real query surfaced is the best demand signal there is, so
+	// deferring it is scheduling rather than discarding.
+	const deferred = urls.slice(INLINE_BUDGET);
+	if (deferred.length > 0) {
+		await enqueue(
+			pool,
+			deferred.flatMap((url) => {
+				const domain = domainOf(url);
+				return domain ? [{ url, domain, authority: priorAuthority(url) }] : [];
+			}),
+		).catch((error) => {
+			logger.warn(
+				{ error: (error as Error).message },
+				"could not defer urls to the frontier",
+			);
+		});
+	}
+
 	// Sequential, deliberately. This is background work competing with live
 	// queries for the same Vespa node, and a burst of parallel feeds is how a
 	// background job becomes a latency incident on the request path.
-	for (const url of urls.slice(0, 10)) {
+	for (const url of urls.slice(0, INLINE_BUDGET)) {
 		if (!running) return;
 		try {
 			const outcome = await indexer.index({ url });
 			logger.debug({ url, outcome: outcome.status }, "indexed");
+
+			// A transport failure is worth retrying later; a refusal is not.
+			// `robots-disallowed` and `javascript-shell` return the same answer
+			// however many times they are asked, and requeueing them is how a
+			// frontier fills with work that can never succeed.
+			if (outcome.status === "failed") {
+				const domain = domainOf(url);
+				if (domain) {
+					await enqueue(pool, [
+						{ url, domain, authority: priorAuthority(url) },
+					]).catch(() => {});
+				}
+			}
 		} catch (error) {
 			logger.warn({ url, error: (error as Error).message }, "index failed");
 		}
