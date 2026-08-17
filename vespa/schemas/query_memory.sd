@@ -1,0 +1,110 @@
+# What the engine has learned about queries it has already answered.
+#
+# This is the collection that makes the architecture's first principle —
+# memory-first — a retrievable thing rather than a slogan. Query Evolution
+# reads it to find out which expansions actually worked last time, and the
+# Retriever reads it to decide whether Vespa alone is enough.
+#
+# It holds no identity. There is no user column, no session column and no IP:
+# the value here is aggregate — what *a* person wanted when they typed this —
+# and storing who wanted it adds nothing this uses and everything a breach
+# would want.
+
+schema query_memory {
+
+	document query_memory {
+
+		field query type string {
+			indexing: index | summary
+			index: enable-bm25
+		}
+
+		# NFKC-folded, lowercased, whitespace-collapsed. The identity key: two
+		# queries with the same normalisation are the same question asked twice.
+		field normalized_query type string {
+			indexing: summary | attribute
+			rank: filter
+		}
+
+		field frequency type long {
+			indexing: summary | attribute
+		}
+
+		# Documents somebody chose after asking this. The strongest relevance
+		# signal the system gets, and the only one nobody has to label.
+		field clicked_docs type array<string> {
+			indexing: summary | attribute
+		}
+
+		field successful_capabilities type array<string> {
+			indexing: summary | attribute
+		}
+
+		# The hypotheses this query has been expanded into before, and which of
+		# them the click landed under. Query Evolution reads these first —
+		# an expansion with a click history beats one a model just invented.
+		field expansions type array<string> {
+			indexing: index | summary
+			index: enable-bm25
+		}
+
+		field intent type string {
+			indexing: summary | attribute
+			rank: filter
+		}
+
+		field last_seen_at type long {
+			indexing: summary | attribute
+		}
+	}
+
+	field embedding type tensor<float>(x[384]) {
+		indexing: input query | embed e5 | attribute | index
+		attribute {
+			distance-metric: angular
+		}
+		index {
+			hnsw {
+				max-links-per-node: 16
+				neighbors-to-explore-at-insert: 100
+			}
+		}
+	}
+
+	fieldset default {
+		fields: query, expansions
+	}
+
+	rank-profile hybrid {
+
+		inputs {
+			query(q) tensor<float>(x[384])
+			query(intent_boost) double: 1.0
+			query(now) double: 0.0
+		}
+
+		function lexical() {
+			expression: (bm25(query) + bm25(expansions)) / (12.0 + bm25(query) + bm25(expansions))
+		}
+
+		function semantic() {
+			expression: closeness(field, embedding)
+		}
+
+		# log1p, because the difference between a query asked once and one asked
+		# fifty times is large and the difference between 5000 and 5050 is not.
+		function demand() {
+			expression: log(1 + attribute(frequency)) / 10.0
+		}
+
+		first-phase {
+			expression: query(intent_boost) * (lexical + semantic + min(1.0, demand))
+		}
+
+		match-features {
+			lexical
+			semantic
+			demand
+		}
+	}
+}

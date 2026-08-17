@@ -1,0 +1,279 @@
+# The web plane.
+#
+# One document per canonical URL. Chunks live inside the document as a
+# multi-vector rather than as a separate collection: the TDS lists four
+# collections and this keeps that contract, while still honouring the 300-600
+# token chunks with 20% overlap that the indexing pipeline produces.
+#
+# The TDS's `embedding` field is realised as `chunk_embeddings`. A single
+# document-level vector is strictly worse for retrieval — a 4000-word page
+# averaged into one point matches nothing well — and computing both would
+# double the feed-time embedding cost for a vector nothing reads.
+
+schema web_document {
+
+	document web_document {
+
+		field doc_id type string {
+			indexing: summary | attribute
+			rank: filter
+		}
+
+		field url type string {
+			indexing: summary | attribute
+			rank: filter
+		}
+
+		# The host verbatim, not eTLD+1. This is the join key to `capability`,
+		# and a capability published at docs.example.com is not a claim about
+		# example.com.
+		field domain type string {
+			indexing: summary | attribute
+			rank: filter
+		}
+
+		field path type string {
+			indexing: summary
+		}
+
+		field title type string {
+			indexing: index | summary
+			index: enable-bm25
+		}
+
+		field body type string {
+			indexing: index | summary
+			index: enable-bm25
+		}
+
+		field chunks type array<string> {
+			indexing: index | summary
+			index: enable-bm25
+		}
+
+		field language type string {
+			indexing: summary | attribute
+			rank: filter
+		}
+
+		# Source reputation, 0..1, written by the indexer. Held on the document
+		# rather than computed at query time because it is a property of the
+		# host and does not change between queries.
+		field authority type float {
+			indexing: summary | attribute
+		}
+
+		# A precomputed decay, kept because the TDS names the field. Ranking
+		# uses `published_at` instead — a stored decay is wrong the moment it is
+		# stored, and gets more wrong the longer the document sits unre-indexed.
+		field freshness type float {
+			indexing: summary | attribute
+		}
+
+		# Seconds since epoch. Zero means "the page declared no date", which is
+		# the common case and must not be read as 1970.
+		field published_at type long {
+			indexing: summary | attribute
+		}
+
+		field indexed_at type long {
+			indexing: summary | attribute
+		}
+
+		field entities type array<string> {
+			indexing: summary | attribute
+		}
+
+		# The same entities, weighted by extraction confidence. Two fields
+		# because they have two jobs: the array is displayed and filtered on,
+		# the tensor is multiplied against the query's entities in ranking.
+		field entity_weights type tensor<float>(e{}) {
+			indexing: summary | attribute
+		}
+
+		# Knowledge-graph importance of this document's entities, 0..1.
+		field graph_importance type float {
+			indexing: summary | attribute
+		}
+
+		# 64-bit SimHash of the extracted text, for near-duplicate detection.
+		field simhash type long {
+			indexing: summary | attribute
+		}
+
+		field image type string {
+			indexing: summary
+		}
+	}
+
+	# Retrieval vectors: one per chunk, HNSW-indexed. `angular` because e5
+	# normalises its output, so angular distance and cosine similarity agree.
+	field chunk_embeddings type tensor<float>(p{}, x[384]) {
+		indexing: input chunks | embed e5 | attribute | index
+		attribute {
+			distance-metric: angular
+		}
+		index {
+			hnsw {
+				max-links-per-node: 16
+				neighbors-to-explore-at-insert: 100
+			}
+		}
+	}
+
+	# Document side of the cross-encoder input. Read for 30 documents per
+	# query, so it stays in memory rather than paged: a disk read inside the
+	# global phase is a disk read inside the latency budget.
+	field rerank_tokens type tensor<float>(d0[256]) {
+		indexing: (input title || "") . " " . (input body || "") | embed tokenizer | attribute
+	}
+
+	fieldset default {
+		fields: title, body, chunks
+	}
+
+	# By file, not by URL. The embedder's models in services.xml are fetched by
+	# the config server from their `url=` attributes, but `onnx-model` rejects
+	# the same thing outright — "URI for ONNX models are not currently
+	# supported". So this one file is downloaded into the package by
+	# vespa/apply.sh, which runs on whichever host the config server is on so
+	# the 90MB never crosses a deploy tunnel.
+	onnx-model cross_encoder {
+		file: models/cross_encoder.onnx
+		input input_ids: my_input_ids
+		input attention_mask: my_attention_mask
+		input token_type_ids: my_token_type_ids
+	}
+
+	# The TDS formula:
+	#
+	#   Score = IntentBoost × (BM25 + Semantic + Authority + Freshness
+	#                          + EntityBoost + CapabilityBoost + GraphBoost)
+	#
+	# implemented with each term normalised to 0..1 first. Summing a raw BM25
+	# score, which is unbounded and routinely reaches 20, with six terms that
+	# cannot exceed 1 does not produce the ranking the formula describes — it
+	# produces a BM25 ranking with rounding error attached. The shape of the
+	# formula is the specification; the units were never stated, so they are
+	# chosen here to make the shape mean something.
+	rank-profile hybrid {
+
+		inputs {
+			query(q) tensor<float>(x[384])
+			query(q_entities) tensor<float>(e{})
+			query(q_tokens) tensor<float>(d0[64])
+			query(intent_boost) double: 1.0
+			query(now) double: 0.0
+			# One year, halved. A query input rather than a constant because how
+			# fast a document goes stale is a property of the *question*, not of
+			# the corpus: a news intent wants days here and a documentation
+			# intent wants years, and the intent engine is what knows which.
+			query(freshness_halflife) double: 31536000.0
+		}
+
+		# Saturating rather than linear: the difference between BM25 8 and 12
+		# is not four times the difference between 1 and 2, and treating it that
+		# way lets one keyword-stuffed page outscore everything else.
+		function lexical() {
+			expression: (bm25(title) + bm25(body) + bm25(chunks)) / (12.0 + bm25(title) + bm25(body) + bm25(chunks))
+		}
+
+		# Zero for documents the ANN operator did not match, which is correct:
+		# the query is an OR of userQuery() and nearestNeighbor(), so a document
+		# here on lexical evidence alone has no measured semantic closeness.
+		function semantic() {
+			expression: closeness(field, chunk_embeddings)
+		}
+
+		function authority_score() {
+			expression: attribute(authority)
+		}
+
+		# Half-life decay, written as pow(0.5, age/halflife) so the parameter
+		# means what it is called: at one half-life the score is 0.5, at two it
+		# is 0.25. An exp(-age/scale) form was tried first and is the reason
+		# this comment exists — with a 90-day scale a two-year-old page scored
+		# 0.0008 and a five-year-old page scored zero, which is not a decay, it
+		# is a filter with extra steps.
+		#
+		# An undated page scores 0.5 — neutral — because "we do not know when
+		# this was written" is not the same claim as "this is old", and the
+		# second is what 0 would assert.
+		function freshness_score() {
+			expression: if (attribute(published_at) <= 0, 0.5, pow(0.5, max(0, query(now) - attribute(published_at)) / query(freshness_halflife)))
+		}
+
+		function entity_boost() {
+			expression: min(1.0, sum(query(q_entities) * attribute(entity_weights)))
+		}
+
+		# Always zero here. Web documents carry no capabilities of their own —
+		# the capability schema competes for the same result set with the same
+		# formula, and that is where this term is non-zero. Defined rather than
+		# omitted so the two profiles are the same expression on the same scale.
+		function capability_boost() {
+			expression: 0.0
+		}
+
+		function graph_boost() {
+			expression: attribute(graph_importance)
+		}
+
+		first-phase {
+			expression {
+				query(intent_boost) * (
+					lexical + semantic + authority_score + freshness_score
+					+ entity_boost + capability_boost + graph_boost
+				)
+			}
+		}
+
+		# Returned with every hit so the eval harness can attribute a bad
+		# ranking to a term instead of guessing at one.
+		match-features {
+			lexical
+			semantic
+			authority_score
+			freshness_score
+			entity_boost
+			graph_boost
+		}
+	}
+
+	# The TDS's cross-encoder stage: top 30 candidates, reordered.
+	rank-profile hybrid-rerank inherits hybrid {
+
+		function my_input_ids() {
+			expression: tokenInputIds(256, query(q_tokens), attribute(rerank_tokens))
+		}
+
+		function my_attention_mask() {
+			expression: tokenAttentionMask(256, query(q_tokens), attribute(rerank_tokens))
+		}
+
+		function my_token_type_ids() {
+			expression: tokenTypeIds(256, query(q_tokens), attribute(rerank_tokens))
+		}
+
+		function cross_encoder_score() {
+			expression: sigmoid(onnx(cross_encoder){d0:0, d1:0})
+		}
+
+		global-phase {
+			rerank-count: 30
+			# Mostly the cross-encoder, with enough of the first phase left in to
+			# break ties and to stop a single confidently-wrong pair inversion
+			# from burying a document every other signal agreed on.
+			expression: 0.9 * cross_encoder_score + 0.1 * normalize_linear(firstPhase)
+		}
+
+		match-features {
+			lexical
+			semantic
+			authority_score
+			freshness_score
+			entity_boost
+			graph_boost
+		}
+	}
+}

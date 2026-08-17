@@ -1,0 +1,99 @@
+# The knowledge graph's searchable projection.
+#
+# Postgres is the graph's system of record — nodes, edges and their confidence
+# live there, because a graph is a thing you traverse and join, and Vespa is
+# neither. What lives here is the part a *query* needs: name and alias matching
+# fast enough to disambiguate an entity mid-request.
+#
+# So `GET /entities/{id}` reads Postgres, and query evolution reads this.
+
+schema entity {
+
+	document entity {
+
+		field entity_id type string {
+			indexing: summary | attribute
+			rank: filter
+		}
+
+		field name type string {
+			indexing: index | summary | attribute
+			index: enable-bm25
+		}
+
+		# Person | Organization | Product | Event | Place | Technology | Capability
+		field node_type type string {
+			indexing: summary | attribute
+			rank: filter
+		}
+
+		# The reason this schema earns its place. "PS5" is an alias, not a name,
+		# and the query that needs the knowledge graph most is the one that used
+		# the alias.
+		field aliases type array<string> {
+			indexing: index | summary | attribute
+			index: enable-bm25
+		}
+
+		field description type string {
+			indexing: index | summary
+			index: enable-bm25
+		}
+
+		field popularity type float {
+			indexing: summary | attribute
+		}
+
+		# Degree-derived importance, 0..1. Feeds `graph_importance` on the
+		# documents this entity appears in.
+		field graph_importance type float {
+			indexing: summary | attribute
+		}
+
+		field indexed_at type long {
+			indexing: summary | attribute
+		}
+	}
+
+	field embedding type tensor<float>(x[384]) {
+		indexing: (input name || "") . " " . (input description || "") | embed e5 | attribute | index
+		attribute {
+			distance-metric: angular
+		}
+		index {
+			hnsw {
+				max-links-per-node: 16
+				neighbors-to-explore-at-insert: 100
+			}
+		}
+	}
+
+	fieldset default {
+		fields: name, aliases, description
+	}
+
+	rank-profile hybrid {
+
+		inputs {
+			query(q) tensor<float>(x[384])
+			query(intent_boost) double: 1.0
+		}
+
+		function lexical() {
+			expression: (bm25(name) + bm25(aliases) + bm25(description)) / (12.0 + bm25(name) + bm25(aliases) + bm25(description))
+		}
+
+		function semantic() {
+			expression: closeness(field, embedding)
+		}
+
+		first-phase {
+			expression: query(intent_boost) * (lexical + semantic + attribute(popularity) + attribute(graph_importance))
+		}
+
+		match-features {
+			lexical
+			semantic
+		}
+	}
+}

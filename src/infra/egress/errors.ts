@@ -1,11 +1,10 @@
 /**
- * Why a fetch was refused.
+ * Why an outbound request did not happen, or did not finish.
  *
- * A discriminant rather than a message, because callers act on these
- * differently — `blocked-address` is a security event worth counting, `timeout`
- * is a page to drop and move on from, and `response-too-large` may mean the
- * cap is wrong. Tests assert on the reason for the same purpose: an assertion
- * on message text passes for the wrong cause the moment somebody rewords it.
+ * Every one of these is an ordinary outcome rather than a bug: the web refuses,
+ * redirects, hangs and lies, and a fetcher that throws on any of that is a
+ * fetcher whose caller has to catch everything anyway. The reason is a closed
+ * set so the caller can branch on it and so a metric can count it.
  */
 export type EgressRefusal =
 	| "invalid-url"
@@ -16,8 +15,8 @@ export type EgressRefusal =
 	| "cross-host-redirect"
 	| "too-many-redirects"
 	| "response-too-large"
-	/** Advertised an encoding it then did not send, or sent a corrupt one. */
 	| "decode-failed"
+	| "robots-disallowed"
 	| "timeout"
 	| "request-failed";
 
@@ -25,13 +24,14 @@ export class EgressError extends Error {
 	readonly reason: EgressRefusal;
 	readonly url: string;
 
-	constructor(reason: EgressRefusal, url: string, detail: string) {
-		super(`${reason}: ${detail}`);
+	constructor(reason: EgressRefusal, url: string, detail?: string) {
+		super(detail ? `${reason}: ${detail} (${url})` : `${reason} (${url})`);
 		this.name = "EgressError";
 		this.reason = reason;
 		this.url = url;
 	}
 }
 
-export const isEgressError = (error: unknown): error is EgressError =>
-	error instanceof EgressError;
+export function isEgressError(error: unknown): error is EgressError {
+	return error instanceof EgressError;
+}

@@ -1,0 +1,178 @@
+# The action plane.
+#
+# Capabilities are documents. That is the architecture's fourth principle and
+# it is meant literally: this schema carries the same rank-profile name and the
+# same seven-term formula on the same 0..1 scale as `web_document`, because a
+# capability and a web page have to be comparable for "capabilities compete
+# with web pages during ranking" to mean anything.
+#
+# Nothing here is ever invoked by this service. `callable` records whether we
+# *could*, which is ours to decide and never the manifest's.
+
+schema capability {
+
+	document capability {
+
+		field cap_id type string {
+			indexing: summary | attribute
+			rank: filter
+		}
+
+		field domain type string {
+			indexing: summary | attribute
+			rank: filter
+		}
+
+		field invocation_name type string {
+			indexing: summary | attribute
+		}
+
+		field title type string {
+			indexing: index | summary
+			index: enable-bm25
+		}
+
+		field description type string {
+			indexing: index | summary
+			index: enable-bm25
+		}
+
+		field provider type string {
+			indexing: index | summary | attribute
+			index: enable-bm25
+		}
+
+		field auth type string {
+			indexing: summary | attribute
+		}
+
+		field transport type string {
+			indexing: summary | attribute
+		}
+
+		# read | write-reversible | write-irreversible | financial | unknown
+		field effects type string {
+			indexing: summary | attribute
+			rank: filter
+		}
+
+		field callable type bool {
+			indexing: summary | attribute
+		}
+
+		field examples type array<string> {
+			indexing: index | summary
+			index: enable-bm25
+		}
+
+		# What somebody would type to want this. The indexer guarantees the
+		# title and description are the first two entries, so this is never
+		# empty and the embedding below always has something to embed.
+		#
+		# The identifier is deliberately not among them: "calendar.add_event"
+		# embeds as an identifier, not as an intention, and matching it dilutes
+		# every phrase that was written to be matched.
+		field intent_phrases type array<string> {
+			indexing: index | summary
+			index: enable-bm25
+		}
+
+		# Which of the 20 intents this capability serves, weighted. Multiplied
+		# against the query's classified intent to give the TDS's
+		# "intent compatibility" signal a number.
+		field intent_weights type tensor<float>(i{}) {
+			indexing: summary | attribute
+		}
+
+		field intents type array<string> {
+			indexing: summary | attribute
+		}
+
+		field popularity type float {
+			indexing: summary | attribute
+		}
+
+		field indexed_at type long {
+			indexing: summary | attribute
+		}
+	}
+
+	field embedding type tensor<float>(p{}, x[384]) {
+		indexing: input intent_phrases | embed e5 | attribute | index
+		attribute {
+			distance-metric: angular
+		}
+		index {
+			hnsw {
+				max-links-per-node: 16
+				neighbors-to-explore-at-insert: 100
+			}
+		}
+	}
+
+	fieldset default {
+		fields: title, description, provider, examples, intent_phrases
+	}
+
+	rank-profile hybrid {
+
+		inputs {
+			query(q) tensor<float>(x[384])
+			query(q_entities) tensor<float>(e{})
+			query(q_intents) tensor<float>(i{})
+			query(intent_boost) double: 1.0
+			query(now) double: 0.0
+		}
+
+		function lexical() {
+			expression: (bm25(title) + bm25(description) + bm25(examples) + bm25(intent_phrases)) / (12.0 + bm25(title) + bm25(description) + bm25(examples) + bm25(intent_phrases))
+		}
+
+		function semantic() {
+			expression: closeness(field, embedding)
+		}
+
+		# Popularity stands in for authority. Both answer "how much should this
+		# source's own track record count", which is the term's job in the
+		# formula; only the evidence differs.
+		function authority_score() {
+			expression: attribute(popularity)
+		}
+
+		# Capabilities do not go stale the way pages do. Neutral, so the term
+		# neither rewards nor punishes them against a dated web result.
+		function freshness_score() {
+			expression: 0.5
+		}
+
+		function entity_boost() {
+			expression: 0.0
+		}
+
+		# The non-zero one, and the reason this schema exists: how well this
+		# action matches what the query was classified as wanting to do.
+		function capability_boost() {
+			expression: min(1.0, sum(query(q_intents) * attribute(intent_weights)))
+		}
+
+		function graph_boost() {
+			expression: 0.0
+		}
+
+		first-phase {
+			expression {
+				query(intent_boost) * (
+					lexical + semantic + authority_score + freshness_score
+					+ entity_boost + capability_boost + graph_boost
+				)
+			}
+		}
+
+		match-features {
+			lexical
+			semantic
+			authority_score
+			capability_boost
+		}
+	}
+}

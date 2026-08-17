@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!--
+	Deliberately empty.
+
+	Vespa refuses deploys that would silently destroy data — dropping a field,
+	changing an attribute's type, removing a document type — and the refusal is
+	the feature. An override belongs here only when somebody has decided the
+	data loss is intended, with an `until` date that forces the entry to expire
+	rather than becoming permanent:
+
+		<allow until="2026-09-01" comment="dropping unused freshness attribute">
+			field-type-change
+		</allow>
+
+	If a deploy fails with a validation id, read what it is protecting before
+	adding it here. On this application the likely one is `indexing-change`,
+	which means every document has to be re-fed to be correct again.
+-->
+<validation-overrides>
+</validation-overrides>

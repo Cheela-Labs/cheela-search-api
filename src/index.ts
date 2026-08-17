@@ -1,17 +1,20 @@
 import { serve } from "@hono/node-server";
-import pino from "pino";
-import { createApp } from "./app";
-import { config } from "./shared/config";
+import { createApp } from "./gateway/app.js";
+import { config } from "./shared/config.js";
+import { logger } from "./shared/logger.js";
+import { startTelemetry, stopTelemetry } from "./shared/telemetry.js";
+import { buildDeps } from "./wiring.js";
 
-const logger = pino({ level: config.LOG_LEVEL });
+await startTelemetry();
 
-serve(
+const app = createApp(buildDeps());
+
+const server = serve(
 	{
-		fetch: createApp().fetch,
+		fetch: app.fetch,
 		port: config.PORT,
-		// Explicit because Cloud Run routes to the container's external
-		// interface. A server bound to loopback passes every local test and then
-		// fails its startup probe with nothing in the log to say why.
+		// Explicit, because Cloud Run's probes reach the container on its own
+		// address and a server bound to localhost answers none of them.
 		hostname: "0.0.0.0",
 	},
 	(info) => {
@@ -21,3 +24,13 @@ serve(
 		);
 	},
 );
+
+async function shutdown(signal: string): Promise<void> {
+	logger.info({ signal }, "shutting down");
+	server.close();
+	await stopTelemetry();
+	process.exit(0);
+}
+
+process.on("SIGTERM", () => void shutdown("SIGTERM"));
+process.on("SIGINT", () => void shutdown("SIGINT"));

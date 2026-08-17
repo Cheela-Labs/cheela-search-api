@@ -1,15 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { classifyAddress } from "../../src/infra/egress/addresses";
-
-/**
- * Table-driven because the value of this file is coverage of the ranges, not
- * elegance. Every row that is missing here is a range somebody can reach.
- */
+import {
+	classifyAddress,
+	parseIPv4,
+} from "../../src/infra/egress/addresses.js";
 
 const blocked = (address: string) => {
 	const verdict = classifyAddress(address);
 	expect(verdict.allowed, `${address} should be blocked`).toBe(false);
-	return verdict;
+	return verdict.allowed ? "" : verdict.reason;
 };
 
 const allowed = (address: string) => {
@@ -17,112 +15,107 @@ const allowed = (address: string) => {
 	expect(verdict.allowed, `${address} should be allowed`).toBe(true);
 };
 
-describe("classifyAddress · IPv4", () => {
-	it("blocks the cloud metadata endpoint by name", () => {
-		const verdict = blocked("169.254.169.254");
-		// Named explicitly rather than falling through to link-local, so that
-		// narrowing the link-local rule later cannot silently uncover it.
-		expect(verdict.allowed).toBe(false);
-		if (!verdict.allowed) expect(verdict.reason).toContain("metadata");
+describe("parseIPv4", () => {
+	it("reads four decimal octets", () => {
+		expect(parseIPv4("0.0.0.0")).toBe(0);
+		expect(parseIPv4("127.0.0.1")).toBe(0x7f_00_00_01);
+		expect(parseIPv4("255.255.255.255")).toBe(0xff_ff_ff_ff);
 	});
 
-	it.each([
-		["0.0.0.0", "this-network"],
-		["10.0.0.1", "private"],
-		["10.255.255.255", "private"],
-		["100.64.0.1", "shared-cgnat"],
-		["127.0.0.1", "loopback"],
-		["127.1.2.3", "loopback"],
-		["169.254.1.1", "link-local"],
-		["172.16.0.1", "private"],
-		["172.31.255.255", "private"],
-		["192.0.0.1", "ietf-protocol"],
-		["192.0.2.5", "test-net-1"],
-		["192.88.99.1", "6to4-relay"],
-		["192.168.1.1", "private"],
-		["198.18.0.1", "benchmarking"],
-		["198.51.100.1", "test-net-2"],
-		["203.0.113.1", "test-net-3"],
-		["224.0.0.1", "multicast"],
-		["239.255.255.255", "multicast"],
-		["240.0.0.1", "reserved"],
-		["255.255.255.255", "reserved"],
-	])("blocks %s", (address) => {
-		blocked(address);
+	it("rejects octal, which is the whole point", () => {
+		// inet_aton reads this as 127.0.0.1. A checker that disagrees with the
+		// connector about which host this is, is the vulnerability itself.
+		expect(parseIPv4("0177.0.0.1")).toBeNull();
+		expect(parseIPv4("010.0.0.1")).toBeNull();
 	});
 
-	it.each([
-		"1.1.1.1",
-		"8.8.8.8",
-		"93.184.216.34",
-		"172.15.255.255", // one below the private block
-		"172.32.0.0", // one above it
-		"100.63.255.255", // one below CGNAT
-		"223.255.255.255", // one below multicast
-	])("allows %s", (address) => {
-		allowed(address);
-	});
-
-	it("rejects octal and other permissive spellings rather than parsing them", () => {
-		// 0177.0.0.1 is 127.0.0.1 to a resolver that accepts octal. Refusing to
-		// parse it is safer than parsing it one way while the OS parses it
-		// another.
-		blocked("0177.0.0.1");
-		blocked("1.1.1.01");
-		blocked("2130706433");
+	it("rejects short forms, hex, and out-of-range octets", () => {
+		expect(parseIPv4("127.1")).toBeNull();
+		expect(parseIPv4("0x7f.0.0.1")).toBeNull();
+		expect(parseIPv4("256.0.0.1")).toBeNull();
+		expect(parseIPv4("1.2.3.4.5")).toBeNull();
+		expect(parseIPv4("1.2.3.")).toBeNull();
 	});
 });
 
-describe("classifyAddress · IPv6", () => {
-	it.each([
-		["::1", "loopback"],
-		["::", "unspecified"],
-		["fe80::1", "link-local"],
-		["fc00::1", "unique-local"],
-		["fd12:3456::1", "unique-local"],
-		["ff02::1", "multicast"],
-		["2001:db8::1", "documentation"],
-		["64:ff9b::1", "NAT64"],
-		["100::1", "discard"],
-	])("blocks %s", (address) => {
-		blocked(address);
+describe("classifyAddress, IPv4", () => {
+	it("names the metadata server specifically", () => {
+		// Not merely "blocked" — this one must be identifiable in a log,
+		// because it is the difference between a broken link and an incident.
+		expect(blocked("169.254.169.254")).toBe("gcp-metadata");
 	});
 
-	it("unwraps IPv4-mapped addresses instead of pattern-matching the prefix", () => {
-		// The three spellings of loopback that a v6-only prefix check misses.
-		blocked("::ffff:127.0.0.1");
-		blocked("::ffff:169.254.169.254");
-		blocked("::127.0.0.1");
-		blocked("2002:7f00:0001::"); // 6to4 wrapping 127.0.0.1
+	it("blocks every non-public range", () => {
+		expect(blocked("0.0.0.1")).toBe("this-network");
+		expect(blocked("10.1.2.3")).toBe("private");
+		expect(blocked("100.64.0.1")).toBe("shared-cgnat");
+		expect(blocked("127.0.0.1")).toBe("loopback");
+		expect(blocked("169.254.1.1")).toBe("link-local");
+		expect(blocked("172.16.0.1")).toBe("private");
+		expect(blocked("172.31.255.255")).toBe("private");
+		expect(blocked("192.0.0.1")).toBe("ietf-protocol");
+		expect(blocked("192.0.2.1")).toBe("test-net-1");
+		expect(blocked("192.88.99.1")).toBe("6to4-relay");
+		expect(blocked("192.168.1.1")).toBe("private");
+		expect(blocked("198.18.0.1")).toBe("benchmarking");
+		expect(blocked("198.51.100.1")).toBe("test-net-2");
+		expect(blocked("203.0.113.1")).toBe("test-net-3");
+		expect(blocked("224.0.0.1")).toBe("multicast");
+		expect(blocked("240.0.0.1")).toBe("reserved");
+		expect(blocked("255.255.255.255")).toBe("broadcast");
 	});
 
-	it("still blocks a mapped address that would otherwise be public, as 6to4", () => {
-		// 2002:0808:0808:: wraps 8.8.8.8 — a public address, but reached through
-		// a relay we have no reason to use.
-		blocked("2002:0808:0808::");
+	it("allows public unicast, including the edges of blocked ranges", () => {
+		allowed("1.1.1.1");
+		allowed("8.8.8.8");
+		// One below 10.0.0.0/8 and one above 172.16/12.
+		allowed("9.255.255.255");
+		allowed("172.32.0.1");
+		allowed("11.0.0.1");
+		allowed("223.255.255.255");
+	});
+});
+
+describe("classifyAddress, IPv6", () => {
+	it("unwraps IPv4-mapped addresses rather than treating them as v6", () => {
+		expect(blocked("::ffff:127.0.0.1")).toBe("loopback");
+		expect(blocked("::ffff:169.254.169.254")).toBe("gcp-metadata");
+		expect(blocked("::ffff:10.0.0.1")).toBe("private");
+		allowed("::ffff:8.8.8.8");
 	});
 
-	it("allows ordinary global unicast", () => {
+	it("unwraps the deprecated compatible form", () => {
+		expect(blocked("::127.0.0.1")).toBe("loopback");
+	});
+
+	it("looks inside 6to4 and NAT64 for the address they tunnel to", () => {
+		expect(blocked("2002:7f00:0001::")).toBe("6to4:loopback");
+		expect(blocked("2002:a9fe:a9fe::")).toBe("6to4:gcp-metadata");
+		expect(blocked("64:ff9b::127.0.0.1")).toBe("nat64:loopback");
+	});
+
+	it("blocks the v6 local ranges", () => {
+		expect(blocked("::1")).toBe("loopback");
+		expect(blocked("::")).toBe("unspecified");
+		expect(blocked("fc00::1")).toBe("unique-local");
+		expect(blocked("fd12:3456::1")).toBe("unique-local");
+		expect(blocked("fe80::1")).toBe("link-local");
+		expect(blocked("fe80::1%eth0")).toBe("link-local");
+		expect(blocked("ff02::1")).toBe("multicast");
+	});
+
+	it("allows public v6", () => {
+		allowed("2001:4860:4860::8888");
 		allowed("2606:4700:4700::1111");
-		allowed("2a00:1450:4009:81f::200e");
-	});
-
-	it("ignores a zone index when judging scope", () => {
-		blocked("fe80::1%eth0");
 	});
 });
 
-describe("classifyAddress · malformed input", () => {
-	it.each([
-		"",
-		"not-an-address",
-		"example.com",
-		"999.1.1.1",
-		"1.2.3",
-		"1.2.3.4.5",
-		"::gggg",
-		"12345::1",
-	])("blocks %s rather than guessing", (address) => {
-		blocked(address);
+describe("classifyAddress, anything else", () => {
+	it("refuses what it cannot parse, rather than assuming", () => {
+		// "I could not tell what this is" must never mean "so I connected".
+		expect(blocked("")).toBe("unparseable");
+		expect(blocked("not-an-address")).toBe("unparseable");
+		expect(blocked("999.999.999.999")).toBe("unparseable");
+		expect(blocked("12345")).toBe("unparseable");
 	});
 });

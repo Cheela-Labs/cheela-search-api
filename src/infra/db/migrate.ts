@@ -1,93 +1,57 @@
 import { readdir, readFile } from "node:fs/promises";
-import path from "node:path";
-import type { Pool } from "pg";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import type pg from "pg";
 
 /**
- * The migration runner.
+ * A forward-only migration runner.
  *
- * Hand-rolled rather than a framework, because what a migration runner has to
- * get right is short and worth reading: apply each file once, in order, inside
- * a transaction, and never twice concurrently. Everything a framework adds on
- * top of that — down migrations, generated SQL, a DSL — is surface this service
- * does not want between it and its schema.
+ * Small enough to read in one sitting, which is the point — a migration
+ * runner is the code most likely to be inspected during an incident and least
+ * likely to be understood if it is a dependency.
  *
- * ## Forward only
- *
- * There are no down migrations, deliberately. A down migration is written when
- * the schema is fresh in mind and run, if ever, months later against data it
- * was never tested with — the rollback that drops a column takes the data with
- * it. Recovering from a bad migration is a new forward migration, or a restore.
- *
- * ## The advisory lock is not optional
- *
- * Cloud Run scales from zero, so several instances can cold-start within the
- * same second. Without a lock they all read an empty `schema_migrations` and
- * all apply `0001`, and the losers fail on "relation already exists" — during a
- * deploy, which is the worst possible time to be reading an ambiguous error.
- * `pg_advisory_lock` is held on one connection for the duration and released
- * whatever happens.
+ * The ordering property that matters: the advisory lock is taken *before* the
+ * ledger table is created, not after. Two containers starting at once on an
+ * empty database will otherwise both run `CREATE TABLE schema_migrations`, and
+ * one of them loses with a duplicate-key error at the exact moment a deploy is
+ * least able to explain itself.
  */
 
-/** Arbitrary, fixed, and only ever used here. Two callers with the same key serialise. */
-const LOCK_KEY = 0x5ea4_c8a1;
-
-const LEDGER = `
-	CREATE TABLE IF NOT EXISTS public.schema_migrations (
-		name       text        PRIMARY KEY,
-		applied_at timestamptz NOT NULL DEFAULT now()
-	)
-`;
+/** An arbitrary constant that only this application uses. */
+const LOCK_ID = 0x5ea4_c8a2;
 
 export type MigrationResult = {
 	applied: string[];
 	alreadyApplied: string[];
 };
 
-/**
- * Resolves the migrations directory.
- *
- * One level up from this module in both layouts that exist — `src/infra/db` is
- * bundled to `dist/`, and both `src/..`-relative and `dist/..`-relative paths
- * land on the app root. The Dockerfile copies `migrations/` for the same
- * reason: they are data the runtime reads, not source the build inlines.
- */
 export function migrationsDirectory(fromFileUrl: string): string {
-	return path.join(
-		path.dirname(new URL(fromFileUrl).pathname),
-		"..",
-		"migrations",
-	);
+	// Resolved relative to the compiled file so it works from src/ under tsx
+	// and from dist/ in the container, where `migrations/` sits beside it.
+	return join(dirname(fileURLToPath(fromFileUrl)), "..", "migrations");
 }
 
 export async function migrate(
-	pool: Pool,
+	pool: pg.Pool,
 	directory: string,
 ): Promise<MigrationResult> {
 	const files = (await readdir(directory))
 		.filter((name) => name.endsWith(".sql"))
-		// Lexicographic, which is why they are zero-padded. `10` sorting before
-		// `9` is the classic way to apply a schema in the wrong order.
+		// Lexicographic, which is why they are numbered with leading zeros.
 		.sort();
 
 	const client = await pool.connect();
-	const applied: string[] = [];
-	const alreadyApplied: string[] = [];
+	const result: MigrationResult = { applied: [], alreadyApplied: [] };
 
 	try {
-		// The lock comes first, before *anything* touches the schema — including
-		// creating the ledger. `CREATE TABLE IF NOT EXISTS` is not atomic against
-		// concurrent creation: run four of them at once and Postgres raises
-		// `duplicate key value violates unique constraint
-		// "pg_type_typname_nsp_index"` from its own catalog, because the
-		// existence check and the insert are not one operation. An advisory lock
-		// needs no table of its own, which is what makes it the right thing to
-		// reach for before the first DDL rather than after it.
-		await client.query("SELECT pg_advisory_lock($1)", [LOCK_KEY]);
-		await client.query(LEDGER);
+		await client.query("SELECT pg_advisory_lock($1)", [LOCK_ID]);
+		await client.query(`
+			CREATE TABLE IF NOT EXISTS public.schema_migrations (
+				name       text PRIMARY KEY,
+				applied_at timestamptz NOT NULL DEFAULT now()
+			)
+		`);
 
-		// Read *after* taking the lock. Reading first would mean deciding what to
-		// apply from a snapshot that another instance can invalidate while we
-		// wait — which is the race the lock is here to remove.
 		const { rows } = await client.query<{ name: string }>(
 			"SELECT name FROM public.schema_migrations",
 		);
@@ -95,16 +59,14 @@ export async function migrate(
 
 		for (const name of files) {
 			if (done.has(name)) {
-				alreadyApplied.push(name);
+				result.alreadyApplied.push(name);
 				continue;
 			}
 
-			const sql = await readFile(path.join(directory, name), "utf8");
-
-			// One transaction per migration, so a failure leaves the schema at the
-			// last complete step rather than halfway through this one. CREATE
-			// INDEX CONCURRENTLY cannot run in a transaction — if one is ever
-			// needed, it gets a file of its own and this comment gets an argument.
+			const sql = await readFile(join(directory, name), "utf8");
+			// One transaction per file: a migration either happened or did not.
+			// A partially applied file is the state nobody can recover from
+			// without reading the SQL and guessing how far it got.
 			await client.query("BEGIN");
 			try {
 				await client.query(sql);
@@ -113,6 +75,7 @@ export async function migrate(
 					[name],
 				);
 				await client.query("COMMIT");
+				result.applied.push(name);
 			} catch (error) {
 				await client.query("ROLLBACK");
 				throw new Error(
@@ -122,17 +85,13 @@ export async function migrate(
 					{ cause: error },
 				);
 			}
-
-			applied.push(name);
 		}
-
-		return { applied, alreadyApplied };
 	} finally {
-		// Released even on the failure path, or the next instance to start blocks
-		// forever behind a lock nobody holds a reason for.
 		await client
-			.query("SELECT pg_advisory_unlock($1)", [LOCK_KEY])
+			.query("SELECT pg_advisory_unlock($1)", [LOCK_ID])
 			.catch(() => {});
 		client.release();
 	}
+
+	return result;
 }

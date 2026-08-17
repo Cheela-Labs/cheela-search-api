@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!--
+	The Cheela Search index.
+
+	One container cluster and one content cluster, on one node. That is a
+	deliberate MVP shape, not an oversight: `<nodes count="1"/>` in both places
+	is the only thing that has to change to grow this, and nothing in the
+	schemas assumes single-node.
+
+	The two ONNX models are declared here rather than shipped in the package.
+	The config server downloads them itself, which keeps ~220MB of model
+	binaries out of git and out of every deploy upload.
+-->
+<services version="1.0">
+
+	<container id="query" version="1.0">
+		<document-api/>
+		<search/>
+
+		<!--
+			The embedder. e5-small-v2 at 384 dimensions, chosen because it is small
+			enough to run beside the content node on one 8GB host and good enough
+			that the semantic term is worth having.
+
+			`prepend` is not optional for this model family: e5 was trained with
+			"query:" and "passage:" prefixes and silently loses accuracy without
+			them. The asymmetry is the point — the same text embedded as a query
+			and as a passage must produce different vectors.
+		-->
+		<component id="e5" type="hugging-face-embedder">
+			<transformer-model url="https://data.vespa-cloud.com/onnx_models/e5-small-v2/model.onnx"/>
+			<tokenizer-model url="https://data.vespa-cloud.com/onnx_models/e5-small-v2/tokenizer.json"/>
+			<prepend>
+				<query>query:</query>
+				<document>passage:</document>
+			</prepend>
+			<pooling-strategy>mean</pooling-strategy>
+			<normalize>true</normalize>
+			<max-tokens>384</max-tokens>
+		</component>
+
+		<!--
+			The cross-encoder's tokenizer, used at both ends: the indexer tokenizes
+			document text into `rerank_tokens` at feed time, and the query
+			tokenizes itself into `query(q_tokens)`. Both must come from this one
+			component or the token ids will not mean the same thing.
+		-->
+		<component id="tokenizer" type="hugging-face-tokenizer">
+			<model url="https://huggingface.co/cross-encoder/ms-marco-MiniLM-L-6-v2/resolve/main/tokenizer.json"/>
+		</component>
+
+		<nodes count="1">
+			<!--
+				Percentages, not fixed sizes, so the same package runs on the 8GB
+				production VM and in a 4GB dev container. The container needs less
+				heap than it looks: ONNX inference allocates off-heap, so leaving
+				headroom outside the JVM matters more than a large heap.
+			-->
+			<jvm allocated-memory="25%"/>
+		</nodes>
+	</container>
+
+	<content id="cheela" version="1.0">
+		<min-redundancy>1</min-redundancy>
+
+		<documents>
+			<document type="web_document" mode="index"/>
+			<document type="capability" mode="index"/>
+			<document type="entity" mode="index"/>
+			<document type="query_memory" mode="index"/>
+		</documents>
+
+		<nodes count="1"/>
+
+		<tuning>
+			<!--
+				Vespa stops accepting writes above 75% disk by default and reports it
+				as a feed error, which reads like a broken indexer rather than a full
+				disk. Raised because the development machine runs at 84% and would
+				never accept a document; production has a dedicated 50GB disk and
+				will not come near this.
+			-->
+			<resource-limits>
+				<disk>0.92</disk>
+				<memory>0.85</memory>
+			</resource-limits>
+		</tuning>
+	</content>
+
+</services>

@@ -5,3 +5,6 @@ coverage
 *.tsbuildinfo
 .env*
 !.env.example
+
+# Downloaded by vespa/apply.sh, not committed: ~90MB of ONNX.
+vespa/.model-cache
