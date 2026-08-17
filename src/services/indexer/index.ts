@@ -41,13 +41,37 @@ export type IndexerDeps = {
 	pool: pg.Pool;
 	vespa: VespaClient;
 	egress: EgressClient;
-	/** Archives raw HTML so re-extraction never needs a re-crawl. */
-	archive?: (key: string, body: Buffer, contentType: string) => Promise<string>;
-	/** Named entities found in the text. Step 7. */
-	entities?: (
+	/**
+	 * Archives raw HTML so re-extraction never needs a re-crawl.
+	 *
+	 * Returns undefined when the write failed, rather than throwing. Archiving is
+	 * best-effort by design: losing the copy costs a future re-extraction, never
+	 * the document being indexed right now.
+	 */
+	archive?: (
+		key: string,
+		body: Buffer,
+		contentType: string,
+	) => Promise<string | undefined>;
+	/**
+	 * Entities and relationships found in the text. Steps 7 and 10.
+	 *
+	 * Returns both together because they are one extraction: an edge whose ends
+	 * are not in the same entity list cannot be inserted, since graph.edges has
+	 * foreign keys to graph.entities.
+	 */
+	extract?: (
 		text: string,
 		title: string,
-	) => Promise<{ name: string; type: string; confidence: number }[]>;
+	) => Promise<{
+		entities: { name: string; type: string; confidence: number }[];
+		edges: {
+			source: string;
+			relation: string;
+			target: string;
+			confidence: number;
+		}[];
+	}>;
 };
 
 export type IndexInput = {
@@ -210,10 +234,12 @@ export function createIndexer(deps: IndexerDeps) {
 
 			// ---- 6 metadata, 7 entities ---------------------------------------
 			const authority = input.authority ?? priorAuthority(canonical);
-			const found = (await deps.entities?.(text, title).catch(() => [])) ?? [];
+			const extraction = (await deps
+				.extract?.(text, title)
+				.catch(() => null)) ?? { entities: [], edges: [] };
 
 			const entityWeights: Record<string, number> = {};
-			for (const entity of found.slice(0, 24)) {
+			for (const entity of extraction.entities.slice(0, 24)) {
 				entityWeights[entity.name] = entity.confidence;
 			}
 
@@ -287,14 +313,18 @@ export function createIndexer(deps: IndexerDeps) {
 			);
 
 			// ---- 10 graph ------------------------------------------------------
-			if (found.length > 0) {
+			//
+			// Published rather than written here. The graph is the worker's to
+			// update: an upsert per entity plus one per edge is a dozen statements,
+			// and `POST /index/document` is a request somebody is waiting on.
+			if (extraction.entities.length > 0) {
 				void publish(
 					STREAMS.graph,
 					envelope({
 						type: "EntitiesExtracted" as const,
 						docId,
-						entities: found,
-						edges: [],
+						entities: extraction.entities,
+						edges: extraction.edges,
 					}),
 				);
 			}

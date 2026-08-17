@@ -129,9 +129,17 @@ export function signalsFor(
 		previous.entities.map((entry) => entry.toLowerCase()),
 	);
 
+	// Matched on word boundaries, not as a substring. `includes` was the first
+	// version and it counted "Australia" as present in "australian", which also
+	// means "Apple" is present in "applesauce" — and a spurious shared entity is
+	// the signal that turns an unrelated new question into a follow-up, which is
+	// the expensive direction to be wrong in. Morphological variants are missed
+	// as a result; missing a follow-up only costs a shallow answer.
+	const haystack = query.toLowerCase();
 	let sharedEntities = 0;
 	for (const entity of entities) {
-		if (query.toLowerCase().includes(entity)) sharedEntities += 1;
+		const escaped = entity.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+		if (new RegExp(`\\b${escaped}\\b`).test(haystack)) sharedEntities += 1;
 	}
 
 	return {

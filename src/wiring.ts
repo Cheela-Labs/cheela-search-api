@@ -3,6 +3,7 @@ import type { EntityRef } from "./contracts/search.js";
 import { createApp, type GatewayDeps } from "./gateway/app.js";
 import { pool } from "./infra/db/pool.js";
 import { egress } from "./infra/egress/index.js";
+import { archiveOrSkip } from "./infra/gcs/index.js";
 import { model } from "./infra/model/index.js";
 import { createCache } from "./infra/redis/cache.js";
 import { publish } from "./infra/redis/streams.js";
@@ -13,6 +14,7 @@ import { createEvolution } from "./services/evolution/index.js";
 import { createGenerator } from "./services/generator/index.js";
 import { createIndexer } from "./services/indexer/index.js";
 import { createClassifier } from "./services/intent/index.js";
+import { createExtractor } from "./services/knowledge-graph/extract.js";
 import { createGraph } from "./services/knowledge-graph/index.js";
 import { createRetriever } from "./services/retriever/index.js";
 import {
@@ -37,6 +39,10 @@ export function buildDeps(): GatewayDeps {
 	});
 
 	const index = createIndexStage(vespa);
+	// Runs in the worker, off the request path, so its latency is nobody's
+	// problem and its cost is one call per indexed document rather than per
+	// query.
+	const extractor = createExtractor({ model });
 
 	return {
 		classify: createClassifier(model),
@@ -78,15 +84,8 @@ export function buildDeps(): GatewayDeps {
 			pool,
 			vespa,
 			egress,
-			entities: async (text, title) => {
-				// Step 7 of the pipeline is a stub until the knowledge-graph
-				// extraction step lands. It returns nothing rather than guessing:
-				// a bad entity is worse than no entity, because it is written to
-				// the graph and then ranked on.
-				void text;
-				void title;
-				return [];
-			},
+			archive: archiveOrSkip,
+			extract: (text, title) => extractor.extract(text, title),
 		}),
 
 		capabilities: createCapabilities({ pool, vespa }),
