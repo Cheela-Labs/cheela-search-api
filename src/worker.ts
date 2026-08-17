@@ -16,17 +16,33 @@ import { startTelemetry } from "./shared/telemetry.js";
 /**
  * The event consumer.
  *
- * A separate process on a separate Cloud Run service with `min-instances=1`,
- * because a Redis Streams consumer on a scale-to-zero service is a consumer
- * that is usually not running.
+ * A separate process from the one that serves requests, running everything the
+ * user must not wait for: fetching and indexing the pages external providers
+ * returned, and folding extracted entities into the graph. The request path
+ * publishes; this consumes.
  *
- * What it does is everything the user must not wait for: fetching and indexing
- * the pages external providers returned, and folding extracted entities into
- * the graph. The request path publishes; this consumes.
+ * Deployed as a Cloud Run *Job* on a schedule rather than a service — see
+ * `DRAIN_MS` for why, and for the one number that decision turns on.
  */
 
 const GROUP = "indexer";
 const CONSUMER = process.env.K_REVISION ?? `worker-${process.pid}`;
+
+/**
+ * How long to work before exiting, or 0 to run forever.
+ *
+ * This is what lets one binary be both a long-running service and a scheduled
+ * Job, and the Job is what it actually runs as. A Cloud Run service that
+ * consumes a stream needs CPU allocated between requests, and always-allocated
+ * CPU is roughly $46/month for one vCPU — against a few dollars for a Job that
+ * wakes every five minutes, drains the backlog and exits.
+ *
+ * The trade is indexing latency: a page a query discovered is indexed within
+ * minutes rather than seconds. That is explicitly acceptable — the user never
+ * waits for indexing — and it is the cheapest place in this system to spend
+ * time. Set to 0 and deploy this as a service if that ever stops being true.
+ */
+const DRAIN_MS = Number(process.env.WORKER_DRAIN_MS ?? 0);
 
 const indexer = createIndexer({ pool, vespa, egress });
 const graph = createGraph({ pool });
@@ -92,9 +108,21 @@ async function main(): Promise<void> {
 		await ensureGroup(stream, GROUP, client);
 	}
 
-	logger.info({ consumer: CONSUMER, streams }, "worker started");
+	logger.info(
+		{ consumer: CONSUMER, streams, drainMs: DRAIN_MS },
+		"worker started",
+	);
+
+	const deadline =
+		DRAIN_MS > 0 ? Date.now() + DRAIN_MS : Number.POSITIVE_INFINITY;
 
 	while (running) {
+		if (Date.now() >= deadline) {
+			logger.info("drain budget spent; exiting");
+			break;
+		}
+		let handledThisPass = 0;
+
 		for (const stream of streams) {
 			if (!running) break;
 			let deliveries: Awaited<ReturnType<typeof consume>>;
@@ -148,6 +176,15 @@ async function main(): Promise<void> {
 			}
 
 			await acknowledge(stream, GROUP, done, client).catch(() => {});
+			handledThisPass += deliveries.length;
+		}
+
+		// A full pass across every stream with nothing to do means the backlog is
+		// gone. As a Job that is the signal to exit and stop billing; as a
+		// service DRAIN_MS is zero and it keeps blocking on the next read.
+		if (DRAIN_MS > 0 && handledThisPass === 0) {
+			logger.info("streams are empty; exiting");
+			break;
 		}
 	}
 
