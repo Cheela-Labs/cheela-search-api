@@ -46,6 +46,43 @@ schema web_document {
 			index: enable-bm25
 		}
 
+		# The page's own summary of itself, and often better written than its
+		# opening paragraph — a meta description is drafted to be read alone.
+		field description type string {
+			indexing: index | summary
+			index: enable-bm25
+		}
+
+		# H1-H6 in document order: the author's own outline of what the page is
+		# about. Indexed separately from the body so a heading match can count
+		# for more than the same words buried in prose.
+		field headings type array<string> {
+			indexing: index | summary
+			index: enable-bm25
+		}
+
+		# Where the page sits in its site's hierarchy, from JSON-LD when the
+		# publisher declared it and from the nav when they did not.
+		field breadcrumbs type array<string> {
+			indexing: index | summary
+			index: enable-bm25
+		}
+
+		# JSON-LD, stored whole as a summary field rather than picked apart into
+		# columns. schema.org is open-ended and the fields worth having tomorrow
+		# are not knowable today; keeping the block means a later reader can ask
+		# a question this schema never anticipated.
+		field jsonld type string {
+			indexing: summary
+		}
+
+		# The hash the crawler compared to decide this page had changed. Carried
+		# into the index so a reindex can be reconciled against the metadata
+		# store without a second query.
+		field content_hash type string {
+			indexing: summary | attribute
+		}
+
 		field chunks type array<string> {
 			indexing: index | summary
 			index: enable-bm25
@@ -129,7 +166,7 @@ schema web_document {
 	}
 
 	fieldset default {
-		fields: title, body, chunks
+		fields: title, description, headings, breadcrumbs, body, chunks
 	}
 
 	# By file, not by URL. The embedder's models in services.xml are fetched by
@@ -174,8 +211,16 @@ schema web_document {
 		# Saturating rather than linear: the difference between BM25 8 and 12
 		# is not four times the difference between 1 and 2, and treating it that
 		# way lets one keyword-stuffed page outscore everything else.
+		# Headings and the description are weighted alongside the title because
+		# all three are the page's deliberate account of itself, where the body is
+		# whatever else it happened to contain.
 		function lexical() {
-			expression: (bm25(title) + bm25(body) + bm25(chunks)) / (12.0 + bm25(title) + bm25(body) + bm25(chunks))
+			expression {
+				(bm25(title) + bm25(description) + bm25(headings) + bm25(breadcrumbs)
+				 + bm25(body) + bm25(chunks))
+				/ (12.0 + bm25(title) + bm25(description) + bm25(headings)
+				   + bm25(breadcrumbs) + bm25(body) + bm25(chunks))
+			}
 		}
 
 		# Zero for documents the ANN operator did not match, which is correct:

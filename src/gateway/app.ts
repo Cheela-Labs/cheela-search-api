@@ -1,16 +1,12 @@
 import type { VespaClient } from "@cheela/search-core";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import {
-	indexDocumentSchema,
-	searchRequestSchema,
-} from "../contracts/search.js";
+import { searchRequestSchema } from "../contracts/search.js";
 import { databaseReachable } from "../infra/db/pool.js";
 import { cacheStats, rateLimit } from "../infra/redis/cache.js";
 import { redisReachable } from "../infra/redis/client.js";
 import { type OrchestratorDeps, runSearch } from "../orchestrator/index.js";
 import type { Capabilities } from "../services/capabilities/index.js";
-import type { Indexer } from "../services/indexer/index.js";
 import type { Graph } from "../services/knowledge-graph/index.js";
 import { config } from "../shared/config.js";
 import { logger } from "../shared/logger.js";
@@ -24,7 +20,6 @@ import { logger } from "../shared/logger.js";
  */
 
 export type GatewayDeps = OrchestratorDeps & {
-	indexer: Indexer;
 	capabilities: Capabilities;
 	graph: Graph;
 	vespa: VespaClient;
@@ -80,7 +75,6 @@ export function createApp(deps: GatewayDeps) {
 	 * so an open endpoint is somebody else's queries on our quota.
 	 */
 	app.use("/search", authenticate);
-	app.use("/index/*", authenticate);
 	app.use("/entities/*", authenticate);
 
 	async function authenticate(
@@ -147,25 +141,6 @@ export function createApp(deps: GatewayDeps) {
 				"search failed",
 			);
 			return context.json({ error: "Search failed" }, 500);
-		}
-	});
-
-	app.post("/index/document", async (context) => {
-		const body = await context.req.json().catch(() => null);
-		const parsed = indexDocumentSchema.safeParse(body);
-		if (!parsed.success) {
-			return context.json(
-				{ error: "Invalid document", detail: parsed.error.issues[0]?.message },
-				400,
-			);
-		}
-
-		try {
-			const outcome = await deps.indexer.index(parsed.data);
-			return context.json(outcome, outcome.status === "failed" ? 502 : 200);
-		} catch (error) {
-			logger.error({ error: (error as Error).message }, "indexing failed");
-			return context.json({ error: "Indexing failed" }, 500);
 		}
 	});
 

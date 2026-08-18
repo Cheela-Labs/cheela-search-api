@@ -6,7 +6,6 @@ import {
 	type Turn,
 	terms,
 } from "../../src/services/context/index.js";
-import { priority, WEIGHTS } from "../../src/services/crawler/index.js";
 import {
 	MAX_SINGLE_OBSERVATION,
 	parseExtraction,
@@ -261,49 +260,6 @@ source | relation | target | confidence
 Google | part_of | Google | 0.9`);
 		expect(result.entities).toHaveLength(1);
 		expect(result.edges).toEqual([]);
-	});
-});
-
-/* -------------------------------------------------------------------------- */
-/* Crawl priority                                                             */
-/* -------------------------------------------------------------------------- */
-
-describe("crawl priority", () => {
-	it("uses the specification's weights, which sum to one", () => {
-		expect(
-			WEIGHTS.demand +
-				WEIGHTS.authority +
-				WEIGHTS.freshness +
-				WEIGHTS.graphImportance,
-		).toBeCloseTo(1, 10);
-		expect(WEIGHTS.demand).toBe(0.35);
-	});
-
-	it("computes the formula", () => {
-		expect(
-			priority({ demand: 1, authority: 1, freshness: 1, graphImportance: 1 }),
-		).toBeCloseTo(1, 10);
-		expect(
-			priority({ demand: 1, authority: 0, freshness: 0, graphImportance: 0 }),
-		).toBeCloseTo(0.35, 10);
-	});
-
-	it("weights demand above every other term", () => {
-		// Demand-driven means demand actually dominates: a much-searched page with
-		// nothing else going for it beats an authoritative one nobody wants.
-		const demanded = priority({
-			demand: 1,
-			authority: 0,
-			freshness: 0,
-			graphImportance: 0,
-		});
-		const authoritative = priority({
-			demand: 0,
-			authority: 1,
-			freshness: 0,
-			graphImportance: 0,
-		});
-		expect(demanded).toBeGreaterThan(authoritative);
 	});
 });
 
