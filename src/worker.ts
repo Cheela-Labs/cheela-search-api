@@ -1,6 +1,5 @@
 import { STREAMS } from "./contracts/events.js";
 import { pool } from "./infra/db/pool.js";
-import { egress } from "./infra/egress/index.js";
 import {
 	acknowledge,
 	consume,
@@ -8,12 +7,19 @@ import {
 	ensureGroup,
 } from "./infra/redis/index.js";
 import { vespa } from "./infra/vespa/client.js";
-import { enqueue } from "./services/crawler/index.js";
-import { createIndexer, priorAuthority } from "./services/indexer/index.js";
-import { createGraph, entityId } from "./services/knowledge-graph/index.js";
+import {
+	claim,
+	complete,
+	enqueue,
+	recordQuery,
+} from "./services/crawler/index.js";
+import { priorAuthority } from "./services/indexer/index.js";
+import { entityId } from "./services/knowledge-graph/index.js";
+import { createIndexStage } from "./services/retriever/vespa-stage.js";
 import { logger } from "./shared/logger.js";
 import { domainOf } from "./shared/normalize.js";
 import { startTelemetry } from "./shared/telemetry.js";
+import { buildGraph, buildIndexer } from "./wiring.js";
 
 /**
  * The event consumer.
@@ -46,8 +52,14 @@ const CONSUMER = process.env.K_REVISION ?? `worker-${process.pid}`;
  */
 const DRAIN_MS = Number(process.env.WORKER_DRAIN_MS ?? 0);
 
-const indexer = createIndexer({ pool, vespa, egress });
-const graph = createGraph({ pool });
+// From wiring.ts, not assembled here. See buildIndexer's comment: a second
+// wiring is how this process ended up indexing without archiving or
+// extracting anything, for weeks, while its tests passed.
+const indexer = buildIndexer();
+const graph = buildGraph();
+// Read on the request path, written here: the same module owns both halves of
+// query memory so they cannot disagree about the key.
+const index = createIndexStage(vespa);
 
 let running = true;
 
@@ -104,6 +116,51 @@ async function handleSearchExecuted(urls: string[]): Promise<void> {
 	}
 }
 
+/** How many frontier URLs one pass may take. Bounded so the streams stay live. */
+const FRONTIER_BATCH = 10;
+
+/**
+ * Indexes work the crawl scheduler promoted.
+ *
+ * `plan` moves rows `pending → queued` and, until this existed, nothing moved
+ * them any further: the scheduler ran hourly and promoted into a void.
+ */
+async function drainFrontier(): Promise<number> {
+	let claimed: Awaited<ReturnType<typeof claim>>;
+	try {
+		claimed = await claim(pool, FRONTIER_BATCH);
+	} catch (error) {
+		logger.warn(
+			{ error: (error as Error).message },
+			"could not claim frontier work",
+		);
+		return 0;
+	}
+
+	for (const entry of claimed) {
+		if (!running) break;
+		try {
+			const outcome = await indexer.index({ url: entry.url });
+			await complete(
+				pool,
+				entry.url,
+				outcome.status,
+				"reason" in outcome ? outcome.reason : "",
+			);
+			logger.debug(
+				{ url: entry.url, outcome: outcome.status },
+				"frontier indexed",
+			);
+		} catch (error) {
+			await complete(pool, entry.url, "failed", (error as Error).message).catch(
+				() => {},
+			);
+		}
+	}
+
+	return claimed.length;
+}
+
 async function handleEntities(
 	docId: string,
 	entities: { name: string; type: string; confidence: number }[],
@@ -121,14 +178,30 @@ async function handleEntities(
 	}
 	await graph.recordMention(docId, ids);
 
+	// The extractor emits edges by *name*; ids are derived from name and type
+	// together. Looking the type up from the same extraction is the whole fix
+	// for a bug that silently dropped most edges: both endpoints used to be
+	// resolved as `entityId(name, "Organization")`, so any edge touching a
+	// Person, Product, Place, Event or Technology computed an id that was never
+	// inserted, violated its foreign key, and was logged at debug as "skipped".
+	// `Larry Page → founded → Google` — the specification's own example — failed
+	// on the source every time.
+	const typeOf = new Map(
+		entities.map((entity) => [entity.name.toLowerCase(), entity.type]),
+	);
+
 	for (const edge of edges) {
-		// Both ends must exist before the edge can reference them, and the
-		// extractor emits names rather than ids.
+		const sourceType = typeOf.get(edge.source.toLowerCase());
+		const targetType = typeOf.get(edge.target.toLowerCase());
+		// parseExtraction already drops edges whose ends are not both in the
+		// entity list, so this is a belt-and-braces guard rather than a filter.
+		if (!sourceType || !targetType) continue;
+
 		await graph
 			.upsertEdge({
-				source: entityId(edge.source, "Organization"),
+				source: entityId(edge.source, sourceType),
 				relation: edge.relation,
-				target: entityId(edge.target, "Organization"),
+				target: entityId(edge.target, targetType),
 				confidence: edge.confidence,
 			})
 			.catch((error) => {
@@ -198,6 +271,38 @@ async function main(): Promise<void> {
 				const event = delivery.result.event;
 				try {
 					if (event.type === "SearchExecuted") {
+						// The demand signal first: it is one INSERT and it is what the
+						// crawl scheduler ranks on. Indexing the URLs can fail; the
+						// record of what was asked should not be lost with it.
+						await recordQuery(pool, {
+							normalizedQuery: event.normalizedQuery,
+							intent: event.intent,
+							resultDomains: [
+								...new Set(event.resultUrls.map(domainOf).filter(Boolean)),
+							],
+							servedFrom: event.servedFrom,
+						}).catch((error) => {
+							logger.warn(
+								{ error: (error as Error).message },
+								"could not record the query log",
+							);
+						});
+						// And into query_memory, which the evolution engine reads on
+						// the next search for this question.
+						await index
+							.remember({
+								query: event.query,
+								normalizedQuery: event.normalizedQuery,
+								hypotheses: event.hypotheses,
+								intent: event.intent,
+								resultUrls: event.resultUrls,
+							})
+							.catch((error) => {
+								logger.warn(
+									{ error: (error as Error).message },
+									"could not write query memory",
+								);
+							});
 						await handleSearchExecuted(event.resultUrls);
 					} else if (event.type === "ExternalFetched") {
 						await handleSearchExecuted(event.urls);
@@ -219,9 +324,16 @@ async function main(): Promise<void> {
 			handledThisPass += deliveries.length;
 		}
 
-		// A full pass across every stream with nothing to do means the backlog is
-		// gone. As a Job that is the signal to exit and stop billing; as a
-		// service DRAIN_MS is zero and it keeps blocking on the next read.
+		// With the streams quiet, spend what is left of the budget on the
+		// frontier. Events first, deliberately: a URL a query just produced is
+		// worth more than one the scheduler promoted an hour ago, and the
+		// frontier is the backlog rather than the live signal.
+		const crawled = await drainFrontier();
+		handledThisPass += crawled;
+
+		// A full pass across every stream and the frontier with nothing to do
+		// means the backlog is gone. As a Job that is the signal to exit and stop
+		// billing; as a service DRAIN_MS is zero and it keeps blocking.
 		if (DRAIN_MS > 0 && handledThisPass === 0) {
 			logger.info("streams are empty; exiting");
 			break;

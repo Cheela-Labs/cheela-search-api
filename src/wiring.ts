@@ -32,17 +32,46 @@ import { config } from "./shared/config.js";
  * readable file, and so a test can build the same graph with two things
  * swapped without importing a module that opens a socket at import time.
  */
-export function buildDeps(): GatewayDeps {
-	const graph = createGraph({
+/**
+ * The indexer, wired once.
+ *
+ * Exported so `worker.ts` uses *this* rather than assembling its own. It
+ * previously built `createIndexer({ pool, vespa, egress })` — no `archive`, no
+ * `extract` — and since the worker is where almost all indexing happens, that
+ * meant the crawl path silently archived no HTML and extracted no entities.
+ * Both features were tested, both were reported working, and both only ever ran
+ * for `POST /index/document`.
+ *
+ * Nothing about that bug was visible in a type: the dependencies are optional
+ * because a test may omit them, so the second wiring compiled and ran and just
+ * did less. One builder is the fix — the two call sites can no longer disagree.
+ */
+export function buildIndexer() {
+	// Runs off the request path, so its latency is nobody's problem and its cost
+	// is one model call per indexed document rather than per query.
+	const extractor = createExtractor({ model });
+
+	return createIndexer({
+		pool,
+		vespa,
+		egress,
+		archive: archiveOrSkip,
+		extract: (text, title) => extractor.extract(text, title),
+	});
+}
+
+/** The graph, wired once. Same reason. */
+export function buildGraph() {
+	return createGraph({
 		pool,
 		cache: createCache<EntityRef[]>("entity", config.ENTITY_CACHE_TTL_MS),
+		vespa,
 	});
+}
 
+export function buildDeps(): GatewayDeps {
+	const graph = buildGraph();
 	const index = createIndexStage(vespa);
-	// Runs in the worker, off the request path, so its latency is nobody's
-	// problem and its cost is one call per indexed document rather than per
-	// query.
-	const extractor = createExtractor({ model });
 
 	return {
 		classify: createClassifier(model),
@@ -80,13 +109,7 @@ export function buildDeps(): GatewayDeps {
 			void publish(stream, event);
 		},
 
-		indexer: createIndexer({
-			pool,
-			vespa,
-			egress,
-			archive: archiveOrSkip,
-			extract: (text, title) => extractor.extract(text, title),
-		}),
+		indexer: buildIndexer(),
 
 		capabilities: createCapabilities({ pool, vespa }),
 		graph,

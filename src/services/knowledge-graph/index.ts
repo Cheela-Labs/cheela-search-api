@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type pg from "pg";
 import type { EntityRef } from "../../contracts/search.js";
 import type { Cache } from "../../infra/redis/cache.js";
+import type { VespaClient } from "../../infra/vespa/client.js";
 import { logger } from "../../shared/logger.js";
 
 /**
@@ -79,6 +80,15 @@ export function accumulate(previous: number, observation: number): number {
 export type GraphDeps = {
 	pool: pg.Pool;
 	cache?: Cache<EntityRef[]>;
+	/**
+	 * Feeds the `entity` schema, which the retriever queries for aliases on
+	 * every expansion and which nothing ever wrote to — so alias expansion,
+	 * one of the evolution engine's three sources, always returned empty.
+	 *
+	 * Optional because Postgres is the system of record: a failed feed costs
+	 * alias recall until the next mention, never the node.
+	 */
+	vespa?: VespaClient;
 };
 
 export function createGraph(deps: GraphDeps) {
@@ -112,6 +122,42 @@ export function createGraph(deps: GraphDeps) {
 					input.confidence ?? 0.1,
 				],
 			);
+			// Projected into Vespa for alias matching. After the upsert, so a
+			// failed feed cannot leave the index holding an entity the graph does
+			// not have.
+			if (deps.vespa) {
+				const { rows } = await deps.pool.query<{
+					aliases: string[];
+					description: string;
+					popularity: number;
+					graph_importance: number;
+				}>(
+					`SELECT aliases, description, popularity, graph_importance
+					   FROM graph.entities WHERE entity_id = $1`,
+					[id],
+				);
+				const row = rows[0];
+				if (row) {
+					await deps.vespa
+						.put("entity", id, {
+							entity_id: id,
+							name: input.name,
+							node_type: input.type,
+							aliases: row.aliases,
+							description: row.description,
+							popularity: row.popularity,
+							graph_importance: row.graph_importance,
+							indexed_at: Math.floor(Date.now() / 1000),
+						})
+						.catch((error) => {
+							logger.warn(
+								{ error: (error as Error).message, entity: input.name },
+								"could not project entity into the index",
+							);
+						});
+				}
+			}
+
 			return id;
 		},
 

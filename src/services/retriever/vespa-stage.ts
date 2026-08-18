@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
 	freshnessHalfLife,
 	type Intent,
@@ -252,6 +253,64 @@ export function createIndexStage(vespa: VespaClient) {
 			} catch {
 				return [];
 			}
+		},
+
+		/**
+		 * Writes back what a query turned out to mean.
+		 *
+		 * The counterpart to `remembered` below, and it did not exist: the
+		 * `query_memory` schema was queried on every search and fed by nothing, so
+		 * it always returned empty and the evolution engine's memory source was
+		 * dead. Expansions came from the model alone, every time, including for
+		 * queries answered a thousand times before.
+		 *
+		 * Keyed on the normalised query so the same question asked two ways is one
+		 * row, and `frequency` is read-then-incremented rather than counted, since
+		 * Vespa has no upsert-with-increment.
+		 */
+		async remember(entry: {
+			query: string;
+			normalizedQuery: string;
+			hypotheses: string[];
+			intent: Intent;
+			resultUrls: string[];
+		}): Promise<void> {
+			const id = createHash("sha256")
+				.update(entry.normalizedQuery)
+				.digest("hex")
+				.slice(0, 24);
+
+			let frequency = 1;
+			try {
+				const existing = await vespa.query(
+					{
+						yql: `select frequency from query_memory where normalized_query contains "${entry.normalizedQuery.replace(/"/g, "")}"`,
+						hits: 1,
+						timeout: "1s",
+					},
+					{ timeoutMs: 2000 },
+				);
+				const seen = existing.hits[0]?.fields.frequency;
+				if (typeof seen === "number") frequency = seen + 1;
+			} catch {
+				// A failed read costs an undercounted frequency, never the write.
+			}
+
+			await vespa.put("query_memory", id, {
+				query: entry.query,
+				normalized_query: entry.normalizedQuery,
+				frequency,
+				// Only the expansions, never the original — `remembered` feeds these
+				// straight back into the next expansion, and echoing the query as its
+				// own hypothesis would make the engine converge on repeating itself.
+				expansions: entry.hypotheses.filter(
+					(hypothesis) => hypothesis !== entry.query,
+				),
+				clicked_docs: [],
+				successful_capabilities: [],
+				intent: entry.intent,
+				last_seen_at: Math.floor(Date.now() / 1000),
+			});
 		},
 
 		/** Expansions this query has been given before, best first. */

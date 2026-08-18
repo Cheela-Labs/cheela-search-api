@@ -99,6 +99,105 @@ export async function plan(pool: pg.Pool, limit = 500): Promise<PlanResult> {
 	return { scored: scored.rowCount ?? 0, promoted: promoted.rowCount ?? 0 };
 }
 
+/**
+ * Records what was asked and what answered it.
+ *
+ * This is the demand signal, and until it existed the frontier had none: `plan`
+ * below joins `search.query_log` to score demand, nothing ever inserted a row,
+ * so the join matched nothing and `priority` collapsed to `0.30 × authority`.
+ * The engine called itself demand-driven while ranking on authority alone.
+ *
+ * Written from the worker rather than the request path — the user should not
+ * wait on it — and it carries no identity, because the table has no column for
+ * one. See the comment on `search.query_log` for why that is structural.
+ */
+export async function recordQuery(
+	pool: pg.Pool,
+	entry: {
+		normalizedQuery: string;
+		intent: string;
+		resultDomains: string[];
+		servedFrom: string;
+	},
+): Promise<void> {
+	await pool.query(
+		`INSERT INTO search.query_log
+		   (normalized_query, intent, result_domains, served_from)
+		 VALUES ($1, $2, $3, $4)`,
+		[
+			entry.normalizedQuery,
+			entry.intent,
+			entry.resultDomains,
+			entry.servedFrom,
+		],
+	);
+}
+
+export type ClaimedUrl = { url: string; domain: string };
+
+/**
+ * Takes work off the frontier.
+ *
+ * `plan` promotes rows from `pending` to `queued`; this is the consumer that
+ * was missing, so promotion led nowhere and the scheduler ran hourly against a
+ * table nobody read.
+ *
+ * `FOR UPDATE SKIP LOCKED` so two workers running at once take different rows
+ * rather than the same row twice, and the state moves to `fetching` inside the
+ * same statement — a row that is merely selected is a row a second worker will
+ * also select.
+ */
+export async function claim(
+	pool: pg.Pool,
+	limit: number,
+): Promise<ClaimedUrl[]> {
+	const { rows } = await pool.query<ClaimedUrl>(
+		`WITH taken AS (
+			SELECT url FROM crawl.frontier
+			 WHERE state = 'queued'
+			 ORDER BY priority DESC, next_attempt_at
+			 LIMIT $1
+			 FOR UPDATE SKIP LOCKED
+		)
+		UPDATE crawl.frontier f
+		   SET state = 'fetching'
+		  FROM taken
+		 WHERE f.url = taken.url
+		RETURNING f.url, f.domain`,
+		[limit],
+	);
+	return rows;
+}
+
+/**
+ * Closes out a claimed URL.
+ *
+ * A transport failure goes back to `pending` with exponential backoff, because
+ * asking again later is the whole remedy. A refusal — robots, a JavaScript
+ * shell, a page too short to index — is terminal: it will give the same answer
+ * however many times it is asked, and requeueing it is how a frontier fills
+ * with work that can never succeed.
+ */
+export async function complete(
+	pool: pg.Pool,
+	url: string,
+	outcome: "indexed" | "duplicate" | "refused" | "failed",
+	reason = "",
+): Promise<void> {
+	const terminal = outcome !== "failed";
+	await pool.query(
+		`UPDATE crawl.frontier
+		    SET state = $2,
+		        last_error = NULLIF($3, ''),
+		        next_attempt_at = CASE
+		          WHEN $2 = 'pending'
+		          THEN now() + (least(power(2, attempts), 64) || ' hours')::interval
+		          ELSE next_attempt_at END
+		  WHERE url = $1`,
+		[url, terminal ? outcome : "pending", reason],
+	);
+}
+
 /** Adds a URL to the frontier without disturbing one already there. */
 export async function enqueue(
 	pool: pg.Pool,
