@@ -71,8 +71,30 @@ const schema = z.object({
 	 * when served from the index — so this is a budget, not a safety net. A
 	 * query that blows it should fall through to external retrieval rather
 	 * than spend the user's patience waiting.
+	 *
+	 * This is **Vespa's** budget: it is what goes in the query's `timeout`
+	 * field, where `ranking.softtimeout` turns it into "return what you have"
+	 * rather than an error. The HTTP client waits longer, by
+	 * `VESPA_TRANSPORT_MARGIN_MS` — see `infra/vespa/client.ts` for why the
+	 * two cannot be the same number.
 	 */
 	VESPA_TIMEOUT_MS: integer(400),
+	/**
+	 * How much longer the client waits than Vespa does.
+	 *
+	 * Vespa's soft timeout starts when Vespa receives the query and stops when
+	 * it has an answer; the client's starts earlier and stops later, because
+	 * the request and the response have to cross the network in between. Give
+	 * them the same number and the client's abort always fires first — Vespa's
+	 * partial result is thrown away in flight, every index query is recorded as
+	 * a failure, and the degradation is invisible because the abort looks like
+	 * an unreachable Vespa rather than a budget that was never survivable.
+	 *
+	 * That was the deployed behaviour: `degraded: ["vespa"]` on every query,
+	 * with `vespa document search failed: This operation was aborted` in the
+	 * logs and a healthy Vespa on the other end.
+	 */
+	VESPA_TRANSPORT_MARGIN_MS: integer(600),
 
 	GCS_RAW_BUCKET: z.string().min(1),
 
@@ -80,8 +102,22 @@ const schema = z.object({
 
 	TAVILY_API_KEY: z.string().min(1),
 	ANYSEARCH_API_KEY: z.string().min(1),
-	/** The TDS's soft timeout. A provider slower than this is not an error. */
-	EXTERNAL_TIMEOUT_MS: integer(800),
+	/**
+	 * The TDS's soft timeout. A provider slower than this is not an error.
+	 *
+	 * The TDS says 800ms and that number is not survivable: measured against
+	 * both vendors, Tavily answers in 1.4–1.7s and AnySearch in 1.4–3.4s, so
+	 * an 800ms budget aborts every external call every time. The service ran
+	 * that way and answered `{results: [], answer: ""}` with
+	 * `degraded: ["tavily","anysearch"]` to every query — a soft timeout below
+	 * the floor of what it is timing is not a soft timeout, it is an off
+	 * switch.
+	 *
+	 * 4s clears both vendors' typical response and trims only AnySearch's
+	 * tail. It is a budget for a *paid* call we have already decided to make:
+	 * abandoning it at 800ms spends the money and discards the answer.
+	 */
+	EXTERNAL_TIMEOUT_MS: integer(4000),
 
 	// ---- Models ------------------------------------------------------------
 
