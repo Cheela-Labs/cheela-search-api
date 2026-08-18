@@ -1,4 +1,4 @@
-import { STREAMS } from "./contracts/events.js";
+import { domainOf, STREAMS } from "@cheela/search-core";
 import { pool } from "./infra/db/pool.js";
 import {
 	acknowledge,
@@ -17,7 +17,6 @@ import { priorAuthority } from "./services/indexer/index.js";
 import { entityId } from "./services/knowledge-graph/index.js";
 import { createIndexStage } from "./services/retriever/vespa-stage.js";
 import { logger } from "./shared/logger.js";
-import { domainOf } from "./shared/normalize.js";
 import { startTelemetry } from "./shared/telemetry.js";
 import { buildGraph, buildIndexer } from "./wiring.js";
 

@@ -1,6 +1,6 @@
-import type { EgressClient } from "../../infra/egress/client.js";
+import type { EgressClient } from "@cheela/search-core";
+import { canonicalizeUrl, domainOf } from "@cheela/search-core";
 import { config } from "../../shared/config.js";
-import { canonicalizeUrl, domainOf } from "../../shared/normalize.js";
 
 /**
  * Stage B: the rented index.

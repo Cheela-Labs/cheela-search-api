@@ -1,3 +1,4 @@
+import type { VespaClient } from "@cheela/search-core";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import {
@@ -8,7 +9,6 @@ import {
 import { databaseReachable } from "../infra/db/pool.js";
 import { cacheStats, rateLimit } from "../infra/redis/cache.js";
 import { redisReachable } from "../infra/redis/client.js";
-import type { VespaClient } from "../infra/vespa/client.js";
 import { type OrchestratorDeps, runSearch } from "../orchestrator/index.js";
 import type { Capabilities } from "../services/capabilities/index.js";
 import type { Indexer } from "../services/indexer/index.js";

@@ -1,10 +1,10 @@
 import { createHash } from "node:crypto";
+import type { VespaClient, VespaHit } from "@cheela/search-core";
 import {
 	freshnessHalfLife,
 	type Intent,
 	intentBoost,
 } from "../../contracts/intent.js";
-import type { VespaClient, VespaHit } from "../../infra/vespa/client.js";
 import { config } from "../../shared/config.js";
 import { logger } from "../../shared/logger.js";
 

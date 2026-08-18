@@ -1,5 +1,5 @@
+import type { EgressClient } from "@cheela/search-core";
 import { config } from "../../shared/config.js";
-import type { EgressClient } from "../egress/client.js";
 import { egress } from "../egress/index.js";
 
 /**

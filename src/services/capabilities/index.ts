@@ -1,11 +1,11 @@
+import type { VespaClient } from "@cheela/search-core";
+import { envelope, STREAMS } from "@cheela/search-core";
 import type pg from "pg";
-import { envelope, STREAMS } from "../../contracts/events.js";
 import type {
 	CapabilityRef,
 	RegisterCapabilityRequest,
 } from "../../contracts/search.js";
 import { publish } from "../../infra/redis/streams.js";
-import type { VespaClient } from "../../infra/vespa/client.js";
 import { logger } from "../../shared/logger.js";
 
 /**

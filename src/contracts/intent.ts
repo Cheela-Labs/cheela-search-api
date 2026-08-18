@@ -1,42 +1,10 @@
-import { z } from "zod";
+export {
+	INTENTS,
+	type Intent,
+	intentSchema,
+} from "@cheela/search-core";
 
-/**
- * The intent taxonomy, exactly as both specification documents list it.
- *
- * Twenty values is a lot for a classifier to be reliable at, and that is a
- * known cost rather than an oversight: the taxonomy is the specification's,
- * and collapsing it here would silently change the contract every other
- * component is written against. What the code does instead is treat low
- * confidence as its own outcome — see `Classification.confidence` — so a
- * fifty-fifty call between `news` and `event` degrades to a neutral ranking
- * rather than to a confident wrong one.
- */
-export const INTENTS = [
-	"information",
-	"event",
-	"shopping",
-	"documentation",
-	"navigation",
-	"action",
-	"local",
-	"news",
-	"comparison",
-	"image",
-	"video",
-	"research",
-	"finance",
-	"health",
-	"travel",
-	"sports",
-	"entertainment",
-	"education",
-	"coding",
-	"utility",
-] as const;
-
-export type Intent = (typeof INTENTS)[number];
-
-export const intentSchema = z.enum(INTENTS);
+import type { Intent } from "@cheela/search-core";
 
 export type Classification = {
 	intent: Intent;

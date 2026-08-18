@@ -1,5 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { type CheelaEvent, envelope, STREAMS } from "../contracts/events.js";
+import {
+	type CheelaEvent,
+	envelope,
+	keyFor,
+	STREAMS,
+} from "@cheela/search-core";
 import type {
 	EntityRef,
 	SearchRequest,
@@ -17,7 +22,6 @@ import {
 } from "../services/ranking/index.js";
 import type { Retriever } from "../services/retriever/index.js";
 import { logger } from "../shared/logger.js";
-import { keyFor } from "../shared/normalize.js";
 import { traced } from "../shared/telemetry.js";
 
 /**

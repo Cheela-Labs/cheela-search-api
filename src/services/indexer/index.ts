@@ -1,13 +1,16 @@
 import { createHash } from "node:crypto";
+import type { EgressClient, VespaClient } from "@cheela/search-core";
+import {
+	canonicalizeUrl,
+	domainOf,
+	envelope,
+	isEgressError,
+	STREAMS,
+} from "@cheela/search-core";
 import type pg from "pg";
-import { envelope, STREAMS } from "../../contracts/events.js";
-import type { EgressClient } from "../../infra/egress/client.js";
-import { isEgressError } from "../../infra/egress/errors.js";
 import { publish } from "../../infra/redis/streams.js";
-import type { VespaClient } from "../../infra/vespa/client.js";
 import { config } from "../../shared/config.js";
 import { logger } from "../../shared/logger.js";
-import { canonicalizeUrl, domainOf } from "../../shared/normalize.js";
 import { chunkText } from "./chunk.js";
 import { extract } from "./extract.js";
 import { isNearDuplicate, simhash, toSigned } from "./simhash.js";

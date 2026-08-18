@@ -1,26 +1,18 @@
+import { createEgressClient, createRobotsPolicy } from "@cheela/search-core";
 import { config } from "../../shared/config.js";
-import { createEgressClient } from "./client.js";
-import { createRobotsPolicy } from "./robots.js";
 
-export type { AddressVerdict } from "./addresses.js";
-export { classifyAddress, parseIPv4 } from "./addresses.js";
-export type {
-	EgressClient,
-	EgressConfig,
-	EgressRequest,
-	EgressResponse,
-} from "./client.js";
-export { createEgressClient } from "./client.js";
-export type { EgressRefusal } from "./errors.js";
-export { EgressError, isEgressError } from "./errors.js";
-export type { RobotsPolicy } from "./robots.js";
-export {
-	createRobotsPolicy,
-	isAllowed,
-	parseRobots,
-	productToken,
-} from "./robots.js";
-
+/**
+ * The process-wide egress client.
+ *
+ * The policy itself — the address deny-ranges, the DNS pinning, the redirect
+ * and byte caps, the robots parser — lives in `@cheela/search-core`, because
+ * the Console fetches attacker-influenceable URLs too and two copies of that
+ * table can drift where TypeScript cannot see it.
+ *
+ * What stays here is the *instance*: this app's settings, and the wiring of the
+ * robots policy to a client that does not itself check robots, since otherwise
+ * the first fetch of any origin recurses forever.
+ */
 const settings = {
 	timeoutMs: config.EGRESS_TIMEOUT_MS,
 	maxBytes: config.EGRESS_MAX_BYTES,
@@ -29,17 +21,10 @@ const settings = {
 	respectRobots: config.EGRESS_RESPECT_ROBOTS,
 };
 
-/**
- * robots.txt is fetched through a client that does not itself check robots —
- * otherwise the first fetch of any origin recurses forever. That client is
- * built from the same settings, so a robots fetch is still bounded, still
- * address-checked and still pinned.
- */
 const bare = createEgressClient(settings);
 
-/** The process-wide client. Everything outbound uses this. */
 export const egress = createEgressClient(settings, {
-	robots: createRobotsPolicy(async (url) => {
+	robots: createRobotsPolicy(async (url: string) => {
 		const response = await bare.fetchRaw(url);
 		return { status: response.status, body: response.body };
 	}),

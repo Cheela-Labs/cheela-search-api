@@ -1,4 +1,4 @@
-import { STREAMS } from "./contracts/events.js";
+import { STREAMS } from "@cheela/search-core";
 import type { EntityRef } from "./contracts/search.js";
 import { createApp, type GatewayDeps } from "./gateway/app.js";
 import { pool } from "./infra/db/pool.js";

@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
+import type { VespaClient } from "@cheela/search-core";
 import type pg from "pg";
 import type { EntityRef } from "../../contracts/search.js";
 import type { Cache } from "../../infra/redis/cache.js";
-import type { VespaClient } from "../../infra/vespa/client.js";
 import { logger } from "../../shared/logger.js";
 
 /**

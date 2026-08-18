@@ -1,10 +1,10 @@
-import type { Redis } from "ioredis";
 import {
 	type CheelaEvent,
 	sign,
 	type VerifyResult,
 	verify,
-} from "../../contracts/events.js";
+} from "@cheela/search-core";
+import type { Redis } from "ioredis";
 import { config } from "../../shared/config.js";
 import { logger } from "../../shared/logger.js";
 import { redis as shared } from "./client.js";
