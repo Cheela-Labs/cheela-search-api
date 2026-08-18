@@ -3,7 +3,6 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import {
 	indexDocumentSchema,
-	registerCapabilitySchema,
 	searchRequestSchema,
 } from "../contracts/search.js";
 import { databaseReachable } from "../infra/db/pool.js";
@@ -82,7 +81,6 @@ export function createApp(deps: GatewayDeps) {
 	 */
 	app.use("/search", authenticate);
 	app.use("/index/*", authenticate);
-	app.use("/capabilities/*", authenticate);
 	app.use("/entities/*", authenticate);
 
 	async function authenticate(
@@ -168,28 +166,6 @@ export function createApp(deps: GatewayDeps) {
 		} catch (error) {
 			logger.error({ error: (error as Error).message }, "indexing failed");
 			return context.json({ error: "Indexing failed" }, 500);
-		}
-	});
-
-	app.post("/capabilities/register", async (context) => {
-		const body = await context.req.json().catch(() => null);
-		const parsed = registerCapabilitySchema.safeParse(body);
-		if (!parsed.success) {
-			return context.json(
-				{
-					error: "Invalid capability",
-					detail: parsed.error.issues[0]?.message,
-				},
-				400,
-			);
-		}
-
-		try {
-			const registered = await deps.capabilities.register(parsed.data);
-			return context.json(registered, 201);
-		} catch (error) {
-			logger.error({ error: (error as Error).message }, "registration failed");
-			return context.json({ error: "Registration failed" }, 500);
 		}
 	});
 

@@ -1,13 +1,13 @@
 # The action plane.
 #
-# Capabilities are documents. That is the architecture's fourth principle and
-# it is meant literally: this schema carries the same rank-profile name and the
-# same seven-term formula on the same 0..1 scale as `web_document`, because a
-# capability and a web page have to be comparable for "capabilities compete
-# with web pages during ranking" to mean anything.
+# Capabilities are documents. They carry the same rank-profile name and the same
+# 0..1 scale as `web_document`, because "capabilities compete with web pages
+# during ranking" only means something if the two are comparable.
 #
-# Nothing here is ever invoked by this service. `callable` records whether we
-# *could*, which is ours to decide and never the manifest's.
+# Every field here comes from a published `agent-discovery.json`, or is metadata
+# this platform derived. The two are kept apart on purpose: `capability_json`
+# holds the publisher's object verbatim, and everything prefixed as ours sits
+# outside it. Nothing here is ever invoked by the search plane.
 
 schema capability {
 
@@ -23,32 +23,41 @@ schema capability {
 			rank: filter
 		}
 
-		field invocation_name type string {
+		field version type string {
 			indexing: summary | attribute
 		}
 
-		field title type string {
+		# The original capability object, exactly as published.
+		#
+		# A summary field, not an indexed one: it round-trips to the caller and
+		# is never matched against. Reshaping it into columns would lose whatever
+		# a publisher said that this schema did not anticipate — and the ADS
+		# capability object permits additional properties precisely so they can.
+		field capability_json type string {
+			indexing: summary
+		}
+
+		# What the embedding is built from, and the only text matched lexically.
+		#
+		# Specification fields only: the capability's name, its description, and
+		# its input schema's parameter names. No synthesised phrases, no intent
+		# label, nothing a publisher did not write.
+		#
+		# A conformant capability may carry only a name, a version and an
+		# endpoint — `description` is not required — so retrieval quality here is
+		# bounded by what publishers choose to describe. The remedy is better
+		# descriptions, not better guesses.
+		field embedding_text type string {
 			indexing: index | summary
 			index: enable-bm25
 		}
 
-		field description type string {
-			indexing: index | summary
-			index: enable-bm25
-		}
-
-		field provider type string {
-			indexing: index | summary | attribute
-			index: enable-bm25
-		}
-
-		field auth type string {
-			indexing: summary | attribute
-		}
-
-		field transport type string {
-			indexing: summary | attribute
-		}
+		# ---- Ours, not the manifest's -------------------------------------
+		#
+		# Derived from the capability's verb, never read from what the publisher
+		# wrote. The rule is one-directional: a manifest can only ever lower the
+		# privilege we grant it. A publisher who labels a payment as harmless
+		# does not make it harmless.
 
 		# read | write-reversible | write-irreversible | financial | unknown
 		field effects type string {
@@ -56,35 +65,12 @@ schema capability {
 			rank: filter
 		}
 
+		# Whether *we* would invoke it — read-only, over a transport we speak.
 		field callable type bool {
 			indexing: summary | attribute
 		}
 
-		field examples type array<string> {
-			indexing: index | summary
-			index: enable-bm25
-		}
-
-		# What somebody would type to want this. The indexer guarantees the
-		# title and description are the first two entries, so this is never
-		# empty and the embedding below always has something to embed.
-		#
-		# The identifier is deliberately not among them: "calendar.add_event"
-		# embeds as an identifier, not as an intention, and matching it dilutes
-		# every phrase that was written to be matched.
-		field intent_phrases type array<string> {
-			indexing: index | summary
-			index: enable-bm25
-		}
-
-		# Which of the 20 intents this capability serves, weighted. Multiplied
-		# against the query's classified intent to give the TDS's
-		# "intent compatibility" signal a number.
-		field intent_weights type tensor<float>(i{}) {
-			indexing: summary | attribute
-		}
-
-		field intents type array<string> {
+		field manifest_hash type string {
 			indexing: summary | attribute
 		}
 
@@ -97,8 +83,8 @@ schema capability {
 		}
 	}
 
-	field embedding type tensor<float>(p{}, x[384]) {
-		indexing: input intent_phrases | embed e5 | attribute | index
+	field embedding type tensor<float>(x[384]) {
+		indexing: input embedding_text | embed e5 | attribute | index
 		attribute {
 			distance-metric: angular
 		}
@@ -111,30 +97,27 @@ schema capability {
 	}
 
 	fieldset default {
-		fields: title, description, provider, examples, intent_phrases
+		fields: embedding_text
 	}
 
 	rank-profile hybrid {
 
 		inputs {
 			query(q) tensor<float>(x[384])
-			query(q_entities) tensor<float>(e{})
-			query(q_intents) tensor<float>(i{})
 			query(intent_boost) double: 1.0
-			query(now) double: 0.0
 		}
 
 		function lexical() {
-			expression: (bm25(title) + bm25(description) + bm25(examples) + bm25(intent_phrases)) / (12.0 + bm25(title) + bm25(description) + bm25(examples) + bm25(intent_phrases))
+			expression: bm25(embedding_text) / (12.0 + bm25(embedding_text))
 		}
 
 		function semantic() {
 			expression: closeness(field, embedding)
 		}
 
-		# Popularity stands in for authority. Both answer "how much should this
-		# source's own track record count", which is the term's job in the
-		# formula; only the evidence differs.
+		# Popularity stands in for authority: both answer "how much should this
+		# source's own track record count", which is the term's job. Only the
+		# evidence differs.
 		function authority_score() {
 			expression: attribute(popularity)
 		}
@@ -149,21 +132,24 @@ schema capability {
 			expression: 0.0
 		}
 
-		# The non-zero one, and the reason this schema exists: how well this
-		# action matches what the query was classified as wanting to do.
-		function capability_boost() {
-			expression: min(1.0, sum(query(q_intents) * attribute(intent_weights)))
-		}
-
 		function graph_boost() {
 			expression: 0.0
 		}
 
+		# There is no capability_boost term.
+		#
+		# It used to be `sum(query(q_intents) * attribute(intent_weights))`, and
+		# both of those are gone with the intent field. Matching a request to a
+		# capability is retrieval and ranking over the embedding now.
+		#
+		# `query(intent_boost)` below is a different thing and survives: it is
+		# computed from the *query's* classified intent — an action query prefers
+		# actions — and reads nothing on this document.
 		first-phase {
 			expression {
 				query(intent_boost) * (
 					lexical + semantic + authority_score + freshness_score
-					+ entity_boost + capability_boost + graph_boost
+					+ entity_boost + graph_boost
 				)
 			}
 		}
@@ -172,7 +158,6 @@ schema capability {
 			lexical
 			semantic
 			authority_score
-			capability_boost
 		}
 	}
 }

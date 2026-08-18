@@ -1,10 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-	callableByUs,
-	effectsFor,
-	intentPhrases,
-} from "../../src/services/capabilities/index.js";
-import {
 	isFollowUp,
 	overlap,
 	signalsFor,
@@ -155,74 +150,11 @@ describe("term overlap", () => {
 	});
 });
 
-/* -------------------------------------------------------------------------- */
-/* Capability effects — a security-relevant derivation                        */
-/* -------------------------------------------------------------------------- */
-
-describe("effectsFor", () => {
-	it("classifies by the verb, in order of severity", () => {
-		expect(effectsFor("calendar.add_event")).toBe("write-reversible");
-		expect(effectsFor("orders.get_status")).toBe("read");
-		expect(effectsFor("messages.send")).toBe("write-irreversible");
-		expect(effectsFor("account.delete")).toBe("write-irreversible");
-		expect(effectsFor("cart.checkout")).toBe("financial");
-	});
-
-	it("takes the most severe reading when a name matches twice", () => {
-		// "update_payment" is both an update and a payment. Reading it as the
-		// milder of the two is exactly the mistake that must not be possible.
-		expect(effectsFor("billing.update_refund")).toBe("financial");
-	});
-
-	it("returns unknown rather than guessing, and unknown is not safe", () => {
-		expect(effectsFor("frobnicate.wibble")).toBe("unknown");
-		// Unknown is displayed and ranked, and it is never callable.
-		expect(callableByUs("https", "unknown")).toBe(false);
-	});
-
-	it("reads the title when the identifier says nothing", () => {
-		expect(effectsFor("x.y", "Send an invoice")).toBe("financial");
-	});
-});
-
-describe("callableByUs", () => {
-	it("permits only read-only capabilities over a transport we speak", () => {
-		expect(callableByUs("https", "read")).toBe(true);
-		expect(callableByUs("mcp", "read")).toBe(true);
-	});
-
-	it("refuses anything above read, whatever the transport", () => {
-		for (const effects of [
-			"write-reversible",
-			"write-irreversible",
-			"financial",
-			"unknown",
-		] as const) {
-			expect(callableByUs("https", effects)).toBe(false);
-		}
-	});
-
-	it("refuses a transport we do not speak, even for a read", () => {
-		expect(callableByUs("smtp", "read")).toBe(false);
-		expect(callableByUs("carrier-pigeon", "read")).toBe(false);
-	});
-});
-
-describe("intentPhrases", () => {
-	it("never includes the identifier", () => {
-		// "calendar.add_event" embeds as an identifier rather than an intention,
-		// and including it dilutes every phrase written to be matched by a person.
-		const phrases = intentPhrases({
-			title: "Add Calendar Event",
-			description: "Creates an event on a Google Calendar",
-			provider: "Google Calendar",
-			examples: ["schedule a meeting tomorrow"],
-		});
-		expect(phrases.join(" ")).not.toContain("calendar.add_event");
-		expect(phrases).toContain("Add Calendar Event");
-		expect(phrases).toContain("schedule a meeting tomorrow");
-	});
-});
+/*
+   The effects taxonomy and callability rules moved to apps/search-console with
+   the code that derives them — see its test/capabilities.test.ts. They are not
+   the read plane's concern any more: it reads a verdict, it does not make one.
+*/
 
 /* -------------------------------------------------------------------------- */
 /* Knowledge graph                                                            */

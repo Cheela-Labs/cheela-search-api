@@ -111,7 +111,7 @@ export function buildDeps(): GatewayDeps {
 
 		indexer: buildIndexer(),
 
-		capabilities: createCapabilities({ pool, vespa }),
+		capabilities: createCapabilities({ pool }),
 		graph,
 		vespa,
 	};

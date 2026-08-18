@@ -165,7 +165,6 @@ export function createIndexStage(vespa: VespaClient) {
 		query: string,
 		options: StageAOptions,
 	): Promise<IndexedCapability[]> {
-		const intents: Record<string, number> = { [options.intent]: 1 };
 		const result = await vespa.query(
 			{
 				yql:
@@ -175,7 +174,6 @@ export function createIndexStage(vespa: VespaClient) {
 				type: "weakAnd",
 				"ranking.profile": "hybrid",
 				"input.query(q)": "embed(e5, @query)",
-				"input.query(q_intents)": intents,
 				"input.query(intent_boost)": intentBoost(options.intent, "capability"),
 				hits: 8,
 				timeout: `${config.VESPA_TIMEOUT_MS}ms`,
