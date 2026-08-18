@@ -1,11 +1,19 @@
 import { serve } from "@hono/node-server";
 import { createApp } from "./gateway/app.js";
+import { connectRedis } from "./infra/redis/client.js";
 import { config } from "./shared/config.js";
 import { logger } from "./shared/logger.js";
 import { startTelemetry, stopTelemetry } from "./shared/telemetry.js";
 import { buildDeps } from "./wiring.js";
 
 await startTelemetry();
+
+// Before the first request, so the first published event is not the one that
+// discovers Redis is not connected yet. Non-fatal: this service degrades
+// without Redis rather than refusing to start.
+await connectRedis().catch((error: Error) => {
+	logger.warn({ error: error.message }, "redis did not connect at startup");
+});
 
 const app = createApp(buildDeps());
 

@@ -40,6 +40,27 @@ export function createBlockingClient(): Redis {
 	});
 }
 
+/**
+ * Opens the connection, and waits.
+ *
+ * `lazyConnect` means no socket opens until something is sent, and
+ * `enableOfflineQueue: false` means there is no queue to hold that first
+ * command while it opens — so the first command is rejected outright with
+ * "Stream isn't writeable and enableOfflineQueue options is false".
+ *
+ * Here that lands on `publish`, which swallows failures by design so a Redis
+ * problem never costs a user their search. The cost is that the first event
+ * after a cold start is dropped and only a warning says so — and on a service
+ * that scales to zero, "after a cold start" is a meaningful share of all
+ * traffic. In practice the startup probe's `redisReachable` ping usually
+ * connects first, which is exactly the kind of accident that stops being true
+ * when somebody changes the health check.
+ */
+export async function connectRedis(): Promise<void> {
+	if (redis.status !== "wait") return;
+	await redis.connect();
+}
+
 export async function redisReachable(): Promise<boolean> {
 	try {
 		const reply = await redis.ping();

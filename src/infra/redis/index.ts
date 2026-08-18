@@ -11,11 +11,4 @@ export {
 	redis,
 	redisReachable,
 } from "./client.js";
-export {
-	acknowledge,
-	consume,
-	type Delivery,
-	ensureGroup,
-	pending,
-	publish,
-} from "./streams.js";
+export { publish } from "./streams.js";
