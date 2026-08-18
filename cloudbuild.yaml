@@ -38,8 +38,6 @@ substitutions:
   # than an unexpanded variable.
   _SERVICE_ACCOUNT_NAME: search-api
   _MIGRATE_JOB: search-api-migrate
-  _WORKER_JOB: search-api-worker
-  _SCHEDULER_JOB: search-api-scheduler
   _MIN_INSTANCES: "0"
   _MAX_INSTANCES: "4"
   # Cloud Run reaches Cloud SQL over a unix socket mounted into the container,
@@ -192,45 +190,15 @@ steps:
   #
   # Both need the VPC (Vespa and Redis) and Cloud SQL. Neither is public and
   # neither listens on a port.
-  # ---------------------------------------------------------------------------
-  - id: jobs
-    name: gcr.io/google.com/cloudsdktool/cloud-sdk
-    entrypoint: bash
-    args:
-      - -c
-      - |
-        set -euo pipefail
-        IMAGE=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/${_SERVICE}:${BUILD_ID}
-        SA=${_SERVICE_ACCOUNT_NAME}@${PROJECT_ID}.iam.gserviceaccount.com
-        SECRETS=DATABASE_URL=search-database-url:latest,TAVILY_API_KEY=search-tavily-api-key:latest,ANYSEARCH_API_KEY=search-anysearch-api-key:latest,MODEL_API_KEY=search-composer-api-key:latest,SEARCH_API_TOKEN=search-api-token:latest,VESPA_ENDPOINT=search-vespa-endpoint:latest,REDIS_URL=search-redis-url:latest,EVENT_SIGNING_KEY=search-event-signing-key:latest
-
-        # 2Gi and 240s of drain, against a 300s task timeout. The worker fetches
-        # and extracts real pages, which is the memory-hungry half of this
-        # system; exiting on an empty backlog means it usually finishes early.
-        gcloud run jobs deploy ${_WORKER_JOB} \
-          --image="$IMAGE" \
-          --region=${_REGION} \
-          --service-account="$SA" \
-          --set-cloudsql-instances=${PROJECT_ID}:${_REGION}:${_SQL_INSTANCE_NAME} \
-          --network=${_NETWORK} --subnet=${_SUBNET} --vpc-egress=private-ranges-only \
-          --set-secrets="$SECRETS" \
-          --set-env-vars=NODE_ENV=production,WORKER_DRAIN_MS=240000,GCS_RAW_BUCKET=${PROJECT_ID}_${_REGION}_search-raw \
-          --command=node --args=dist/worker.js \
-          --cpu=1 --memory=2Gi \
-          --max-retries=1 \
-          --task-timeout=300s
-
-        gcloud run jobs deploy ${_SCHEDULER_JOB} \
-          --image="$IMAGE" \
-          --region=${_REGION} \
-          --service-account="$SA" \
-          --set-cloudsql-instances=${PROJECT_ID}:${_REGION}:${_SQL_INSTANCE_NAME} \
-          --network=${_NETWORK} --subnet=${_SUBNET} --vpc-egress=private-ranges-only \
-          --set-secrets="$SECRETS" \
-          --set-env-vars=NODE_ENV=production \
-          --command=node --args=dist/scheduler.js \
-          --cpu=1 --memory=512Mi \
-          --max-retries=1 \
-          --task-timeout=300s
+# No background Jobs.
+#
+# `search-api-worker` and `search-api-scheduler` were deployed from here and
+# are gone: ingestion moved to apps/search-console (ADR-003) and `worker.ts`
+# and `scheduler.ts` went with it. tsup builds two entrypoints now, so these
+# deployments pointed at `dist/worker.js` and `dist/scheduler.js`, neither of
+# which the image contains — the next deploy would have created two Jobs that
+# crash on start and a schedule pointing at them.
+#
+# This service serves queries. The Console owns everything that runs on a timer.
 
 timeout: 1200s
