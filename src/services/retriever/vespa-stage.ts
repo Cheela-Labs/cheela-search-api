@@ -131,6 +131,14 @@ export function createIndexStage(vespa: VespaClient) {
 		query: string,
 		options: StageAOptions,
 	): Promise<IndexedDocument[]> {
+		// The reranking query runs a cross-encoder and a second embedder call;
+		// the others are a plain lookup. Giving both the same budget means either
+		// the cheap ones wait for a deadline they never need or the expensive one
+		// is aborted every time — and it was the latter.
+		const budget = options.rerank
+			? config.VESPA_RERANK_TIMEOUT_MS
+			: config.VESPA_TIMEOUT_MS;
+
 		const result = await vespa.query(
 			{
 				yql:
@@ -150,12 +158,15 @@ export function createIndexStage(vespa: VespaClient) {
 				"input.query(freshness_halflife)": freshnessHalfLife(options.intent),
 				"input.query(now)": Math.floor(Date.now() / 1000),
 				hits: options.limit,
-				timeout: `${config.VESPA_TIMEOUT_MS}ms`,
+				timeout: `${budget}ms`,
 				// Vespa returns what it has when the budget runs out rather than
 				// failing. A slightly worse ranking beats a failed search.
 				ranking: { softtimeout: { enable: true } },
 			},
-			{ signal: options.signal },
+			{
+				signal: options.signal,
+				timeoutMs: budget + config.VESPA_TRANSPORT_MARGIN_MS,
+			},
 		);
 
 		return result.hits.map(toDocument);
@@ -203,8 +214,12 @@ export function createIndexStage(vespa: VespaClient) {
 					// The TDS's failure table: "Vespa unavailable → external
 					// retrieval". Reported as a failure so the orchestrator knows
 					// to go to stage B rather than trusting an empty index.
+					// `rerank` is here because the two paths have different budgets
+					// and fail for different reasons. Without it, telling "the
+					// cross-encoder blew its budget" from "Vespa is unreachable"
+					// meant counting log lines against request counts.
 					logger.warn(
-						{ error: (error as Error).message },
+						{ error: (error as Error).message, rerank: options.rerank },
 						"vespa document search failed",
 					);
 					return null;

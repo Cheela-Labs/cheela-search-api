@@ -95,6 +95,25 @@ const schema = z.object({
 	 * logs and a healthy Vespa on the other end.
 	 */
 	VESPA_TRANSPORT_MARGIN_MS: integer(600),
+	/**
+	 * The budget for the one index query per request that reranks.
+	 *
+	 * Stage A issues a query per hypothesis and exactly one of them — the query
+	 * as the reader typed it — runs `hybrid-rerank`, which adds a cross-encoder
+	 * and a second embedder call to tokenise the query. That is the most
+	 * expensive thing in the retrieval budget by design, and it does not fit in
+	 * a budget sized for a plain lookup.
+	 *
+	 * Measured after the transport margin landed: nine index queries across
+	 * three requests produced exactly three failures — one per request,
+	 * whether the request had four hypotheses or one. The plain `hybrid`
+	 * queries all succeeded. The reranking one never did.
+	 *
+	 * Generous on purpose. `ranking.softtimeout` means Vespa returns what it
+	 * has at the deadline rather than failing, so a budget larger than needed
+	 * costs nothing, while one that is too small costs the whole query.
+	 */
+	VESPA_RERANK_TIMEOUT_MS: integer(2000),
 
 	GCS_RAW_BUCKET: z.string().min(1),
 
