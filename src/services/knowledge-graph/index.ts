@@ -1,5 +1,4 @@
-import { createHash } from "node:crypto";
-import type { VespaClient } from "@cheela/search-core";
+import { type Edge, entityId, type VespaClient } from "@cheela/search-core";
 import type pg from "pg";
 import type { EntityRef } from "../../contracts/search.js";
 import type { Cache } from "../../infra/redis/cache.js";
@@ -20,62 +19,25 @@ import { logger } from "../../shared/logger.js";
  * than "what the last extractor happened to think".
  */
 
-export const NODE_TYPES = [
-	"Person",
-	"Organization",
-	"Product",
-	"Event",
-	"Place",
-	"Technology",
-	"Capability",
-] as const;
+/*
+  The vocabulary and the id function live in `@cheela/search-core`.
 
-export const EDGE_TYPES = [
-	"founded",
-	"owned_by",
-	"located_in",
-	"occurred_in",
-	"part_of",
-	"manufactured_by",
-	"related_to",
-] as const;
-
-export type NodeType = (typeof NODE_TYPES)[number];
-export type EdgeType = (typeof EDGE_TYPES)[number];
-
-export type Edge = {
-	source: string;
-	relation: string;
-	target: string;
-	confidence: number;
-};
-
-/**
- * A stable id from the name, so the same entity extracted from two documents
- * on two days is one node rather than two.
- *
- * Case- and punctuation-folded, which is why "Larry Page" and "larry page"
- * converge. It is a deliberately simple resolver: real entity linking needs a
- * disambiguation model, and until there is one, silently merging "Apple" the
- * company with "apple" the fruit is a known limitation rather than a hidden
- * one.
- */
-export function entityId(name: string, type: string): string {
-	const normalized = name
-		.toLowerCase()
-		.normalize("NFKD")
-		.replace(/[^a-z0-9]+/g, " ")
-		.trim();
-	return createHash("sha256")
-		.update(`${type}:${normalized}`)
-		.digest("hex")
-		.slice(0, 20);
-}
-
-/** Bayesian-ish accumulation: each observation closes part of the gap to 1. */
-export function accumulate(previous: number, observation: number): number {
-	return Math.min(1, previous + observation * (1 - previous) * 0.5);
-}
+  The Console writes this graph and this service reads it (ADR-003), so the two
+  must compute the same `entityId` — a hash of the type and the folded name. Two
+  implementations that fold differently produce two ids for one entity: the
+  writer inserts a node the reader never finds, and the graph fills with
+  orphans without anything erroring. Re-exported here so existing call sites in
+  this service are unchanged.
+*/
+export {
+	accumulate,
+	EDGE_TYPES,
+	type Edge,
+	type EdgeType,
+	entityId,
+	NODE_TYPES,
+	type NodeType,
+} from "@cheela/search-core";
 
 export type GraphDeps = {
 	pool: pg.Pool;
