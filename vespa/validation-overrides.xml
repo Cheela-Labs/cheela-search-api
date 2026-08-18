@@ -8,13 +8,33 @@
 	data loss is intended, with an `until` date that forces the entry to expire
 	rather than becoming permanent:
 
-		<allow until="2026-09-01" comment="dropping unused freshness attribute">
-			field-type-change
-		</allow>
+		<allow until="2026-09-01" comment="dropping unused freshness attribute">field-type-change</allow>
 
 	If a deploy fails with a validation id, read what it is protecting before
 	adding it here. On this application the likely one is `indexing-change`,
 	which means every document has to be re-fed to be correct again.
 -->
 <validation-overrides>
+	<!--
+		Moving embedding generation out of Vespa and into the Embedding Worker
+		(ADR-001) changes how these fields are produced, so Vespa correctly warns
+		that every existing document's vectors are now stale.
+
+		That is true and intended: the worker re-embeds everything it finds with a
+		mismatched hash, which is the same path an embedding-model upgrade takes.
+		Building it here means the upgrade path is proven before it is needed.
+
+		Expires deliberately. If this entry is still here after the date, either
+		the re-index never ran or somebody is using it to wave through a different
+		change.
+	-->
+	<allow until="2026-09-15" comment="ADR-001: embeddings move to the worker; full re-index follows">indexing-change</allow>
+
+	<!--
+		The capability vector also changes shape. It was a multi-vector over
+		invented intent phrases, `tensor(p{},x[384])`; it is now one vector per
+		capability over the specification's own fields. The phrases are gone with
+		the intent field, so there is nothing left to have several vectors of.
+	-->
+	<allow until="2026-09-15" comment="ADR-001: capability embedding is one vector, not one per invented phrase">field-type-change</allow>
 </validation-overrides>

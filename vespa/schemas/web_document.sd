@@ -141,19 +141,25 @@ schema web_document {
 		field image type string {
 			indexing: summary
 		}
-	}
 
-	# Retrieval vectors: one per chunk, HNSW-indexed. `angular` because e5
-	# normalises its output, so angular distance and cosine similarity agree.
-	field chunk_embeddings type tensor<float>(p{}, x[384]) {
-		indexing: input chunks | embed e5 | attribute | index
-		attribute {
-			distance-metric: angular
-		}
-		index {
-			hnsw {
-				max-links-per-node: 16
-				neighbors-to-explore-at-insert: 100
+		# Retrieval vectors: one per chunk, HNSW-indexed. `angular` because e5
+		# normalises its output, so angular distance and cosine similarity agree.
+		#
+		# Fed by the Embedding Worker rather than generated at feed time
+		# (ADR-001), and therefore declared inside the document: it arrives with
+		# the document rather than being derived from it. This is what makes
+		# "only regenerate embeddings when content changes" possible — feeding a
+		# document no longer implies paying to embed it.
+		field chunk_embeddings type tensor<float>(p{}, x[384]) {
+			indexing: attribute | index
+			attribute {
+				distance-metric: angular
+			}
+			index {
+				hnsw {
+					max-links-per-node: 16
+					neighbors-to-explore-at-insert: 100
+				}
 			}
 		}
 	}

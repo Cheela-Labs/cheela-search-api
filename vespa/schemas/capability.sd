@@ -81,17 +81,27 @@ schema capability {
 		field indexed_at type long {
 			indexing: summary | attribute
 		}
-	}
 
-	field embedding type tensor<float>(x[384]) {
-		indexing: input embedding_text | embed e5 | attribute | index
-		attribute {
-			distance-metric: angular
-		}
-		index {
-			hnsw {
-				max-links-per-node: 16
-				neighbors-to-explore-at-insert: 100
+		# Fed by the Embedding Worker, not generated here (ADR-001).
+		#
+		# Declared inside the document block because it arrives with the document
+		# rather than being derived from it — a synthetic field must have an
+		# input, and this one's input is the worker.
+		#
+		# The `e5` component in services.xml stays configured and is still used
+		# for `embed(e5, @query)` on the read path. That is the subtlety of this
+		# decision: one model in two runtimes, comparable only because both are
+		# pinned to the same model id.
+		field embedding type tensor<float>(x[384]) {
+			indexing: attribute | index
+			attribute {
+				distance-metric: angular
+			}
+			index {
+				hnsw {
+					max-links-per-node: 16
+					neighbors-to-explore-at-insert: 100
+				}
 			}
 		}
 	}
