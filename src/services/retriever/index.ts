@@ -456,10 +456,29 @@ export function createRetriever(deps: RetrieverDeps) {
 				options.officialDomain !== undefined &&
 				matchesOfficial(document.domain, options.officialDomain);
 
+			// And when the index did *not* earn its place, it goes second.
+			//
+			// "At equal evidence" is the whole justification for index-first, and
+			// a confidence below the threshold is precisely the statement that
+			// the evidence is not equal — it is why stage B was run at all. Left
+			// unconditional, the index still filled all 20 slots and the external
+			// results it had just paid for were truncated away: `colombia
+			// earthquake` reached stage B, fetched the news, and returned twenty
+			// github.com URLs anyway.
+			//
+			// The one case that keeps index-first is a confident index that was
+			// sent to stage B only to find a missing official domain. There the
+			// index is good and the vendor is filling one specific gap, which the
+			// hoist above already handles.
+			const trusted = confidence >= config.INDEX_CONFIDENCE_THRESHOLD;
+			const others = externalDocuments.filter(
+				(document) => !isOfficial(document),
+			);
+
 			const combined = [
 				...externalDocuments.filter(isOfficial),
-				...documents,
-				...externalDocuments.filter((document) => !isOfficial(document)),
+				...(trusted ? documents : others),
+				...(trusted ? others : documents),
 			];
 
 			return {
