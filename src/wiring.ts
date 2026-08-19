@@ -9,6 +9,7 @@ import { publish } from "./infra/redis/streams.js";
 import { vespa } from "./infra/vespa/client.js";
 import { createCapabilities } from "./services/capabilities/index.js";
 import { createContext, type Session } from "./services/context/index.js";
+import { createEntityRegistry } from "./services/entity-registry/index.js";
 import { createEvolution } from "./services/evolution/index.js";
 import { createGenerator } from "./services/generator/index.js";
 import { createClassifier } from "./services/intent/index.js";
@@ -29,6 +30,15 @@ import { config } from "./shared/config.js";
  * readable file, and so a test can build the same graph with two things
  * swapped without importing a module that opens a socket at import time.
  */
+/**
+ * The Entity Registry, wired once and shared by every request.
+ *
+ * A module-level singleton rather than a per-request build, because the whole
+ * point is that it is already in memory when the intent engine asks. Written by
+ * the Console (ADR-003); this side never writes.
+ */
+export const entityRegistry = createEntityRegistry({ pool });
+
 /** The graph, wired once. Same reason. */
 export function buildGraph() {
 	return createGraph({
@@ -43,7 +53,11 @@ export function buildDeps(): GatewayDeps {
 	const index = createIndexStage(vespa);
 
 	return {
-		classify: createClassifier(model),
+		// The registry is consulted before the model call, so a known name never
+		// reaches an LLM to be guessed at. That is what makes `redis`, `stripe`
+		// and `vercel` get the same answer as each other instead of three
+		// different ones.
+		classify: createClassifier(model, entityRegistry),
 
 		context: createContext({
 			model,

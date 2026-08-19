@@ -22,10 +22,23 @@ import { logger } from "../../shared/logger.js";
  * and of the money.
  */
 
+/**
+ * What the registry recognised, carried alongside the classification.
+ *
+ * Deliberately not folded into `Classification`. That type is projected onto
+ * the wire (`contracts/search.ts`), and an official domain is an internal
+ * ranking input rather than something the response promises — putting it there
+ * would make an implementation detail part of the API the first time somebody
+ * serialised it.
+ */
+export type Navigation = { entity: string; officialDomain: string };
+
+export type ClassifiedQuery = Classification & { navigation?: Navigation };
+
 export type Classifier = (
 	query: string,
 	signal?: AbortSignal,
-) => Promise<Classification>;
+) => Promise<ClassifiedQuery>;
 
 /** A bare hostname or URL. `node.js` must not match, hence the extension list. */
 const HOSTNAME =
@@ -33,16 +46,132 @@ const HOSTNAME =
 const FILE_EXTENSION =
 	/\.(js|ts|py|rb|go|rs|java|c|cpp|h|json|md|txt|sh|yml|yaml|toml|css|html|jsx|tsx|php)$/i;
 
-export type Structural = { intent: Intent; url?: string } | null;
+export type Structural = {
+	intent: Intent;
+	url?: string;
+	/** Set when a known entity name was recognised. */
+	entity?: string;
+	officialDomain?: string;
+} | null;
 
-export function classifyStructurally(query: string): Structural {
+/**
+ * Words that turn a name into a question about the name.
+ *
+ * "redis" wants redis.io. "redis tutorial" wants whoever explains it best, and
+ * "redis wiki" wants Wikipedia — the user named the destination they did not
+ * want. Treating those as navigational is worse than not detecting navigation
+ * at all, because the official-domain boost is strong enough to bury the thing
+ * they asked for.
+ *
+ * `docs` is here for the same reason and is the least obvious: `redis docs`
+ * should land on redis.io/docs, and it does — the official-domain boost applies
+ * to the whole domain, and the depth rule picks the docs page. It does not need
+ * to be classified navigational to get there, and classifying it so would push
+ * the homepage above the docs page the user asked for.
+ */
+const MODIFIERS = new Set([
+	"tutorial",
+	"tutorials",
+	"wiki",
+	"wikipedia",
+	"github",
+	"docs",
+	"doc",
+	"documentation",
+	"guide",
+	"guides",
+	"example",
+	"examples",
+	"vs",
+	"versus",
+	"alternative",
+	"alternatives",
+	"review",
+	"reviews",
+	"news",
+	"download",
+	"install",
+	"error",
+	"issue",
+	"meaning",
+	"define",
+	"definition",
+]);
+
+const QUESTION_WORDS = new Set([
+	"what",
+	"who",
+	"when",
+	"where",
+	"why",
+	"how",
+	"is",
+	"are",
+	"does",
+	"do",
+	"can",
+	"should",
+	"which",
+	"will",
+]);
+
+/** The brief's rule: a navigational query is short. Three words is the ceiling. */
+const MAX_NAVIGATIONAL_WORDS = 3;
+
+export type StructuralDeps = {
+	/** Synchronous on purpose — see the registry's own comment. */
+	lookup(surface: string): { name: string; officialDomain: string } | null;
+};
+
+export function classifyStructurally(
+	query: string,
+	deps?: StructuralDeps,
+): Structural {
 	const trimmed = query.trim();
-	if (/\s/.test(trimmed)) return null;
 
-	const match = HOSTNAME.exec(trimmed);
-	if (match && !FILE_EXTENSION.test(trimmed)) {
-		const url = trimmed.startsWith("http") ? trimmed : `https://${trimmed}`;
-		return { intent: "navigation", url };
+	if (!/\s/.test(trimmed)) {
+		const match = HOSTNAME.exec(trimmed);
+		if (match && !FILE_EXTENSION.test(trimmed)) {
+			const url = trimmed.startsWith("http") ? trimmed : `https://${trimmed}`;
+			// The typed host *is* the official domain for this query. Somebody who
+			// types `redis.io` has named their destination more precisely than any
+			// registry could, so the ranking layer should treat it exactly as it
+			// treats a registry hit — otherwise the one query where the answer is
+			// unambiguous is the one where nothing is boosted.
+			return {
+				intent: "navigation",
+				url,
+				officialDomain: match[1].toLowerCase(),
+			};
+		}
+	}
+
+	// A known name, with nothing else asked about it.
+	//
+	// This used to bail on any whitespace at all, which meant `vercel login`
+	// could never reach the structural pass and every entity-name query was left
+	// to the model. That is why production classified `vercel` as navigation and
+	// `redis` and `stripe` as information: the same question, three different
+	// answers, because it was a guess each time.
+	if (!deps) return null;
+
+	const words = trimmed.toLowerCase().split(/\s+/).filter(Boolean);
+	if (words.length === 0 || words.length > MAX_NAVIGATIONAL_WORDS) return null;
+	if (words.some((word) => MODIFIERS.has(word) || QUESTION_WORDS.has(word))) {
+		return null;
+	}
+
+	// Longest match first: "hugging face" is one entity, and checking the whole
+	// phrase before its words is what stops it resolving to "face".
+	for (let length = words.length; length >= 1; length -= 1) {
+		const entity = deps.lookup(words.slice(0, length).join(" "));
+		if (entity) {
+			return {
+				intent: "navigation",
+				entity: entity.name,
+				officialDomain: entity.officialDomain,
+			};
+		}
 	}
 
 	return null;
@@ -102,12 +231,28 @@ export const UNCERTAIN: Classification = {
 	entities: [],
 };
 
-export function createClassifier(model: TextModel): Classifier {
+export function createClassifier(
+	model: TextModel,
+	registry?: StructuralDeps,
+): Classifier {
 	return async (query, signal) => {
-		const structural = classifyStructurally(query);
+		const structural = classifyStructurally(query, registry);
 		if (structural) {
-			// A hostname is not a guess. Nothing a model says would improve it.
-			return { intent: structural.intent, confidence: 1, entities: [] };
+			// A hostname is not a guess, and neither is a name we hold an official
+			// domain for. Nothing a model says would improve either.
+			return {
+				intent: structural.intent,
+				confidence: 1,
+				entities: structural.entity ? [structural.entity] : [],
+				...(structural.entity && structural.officialDomain
+					? {
+							navigation: {
+								entity: structural.entity,
+								officialDomain: structural.officialDomain,
+							},
+						}
+					: {}),
+			};
 		}
 
 		try {

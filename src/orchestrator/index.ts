@@ -15,6 +15,7 @@ import type { Evolution } from "../services/evolution/index.js";
 import type { Generator } from "../services/generator/index.js";
 import type { Classifier } from "../services/intent/index.js";
 import { actOn } from "../services/intent/index.js";
+import { applyEntitySignals } from "../services/ranking/entity-aware.js";
 import {
 	markCited,
 	selectCapabilities,
@@ -99,6 +100,10 @@ export async function runSearch(
 		deps.retriever.retrieve(hypotheses, {
 			intent,
 			entities: classification.entities,
+			// Passed so retrieval can notice that a navigational query came back
+			// without the one domain it was asking for. It changes when stage B
+			// runs and nothing else — not the hybrid query, not the ranking.
+			officialDomain: classification.navigation?.officialDomain,
 			signal,
 		}),
 	);
@@ -115,14 +120,28 @@ export async function runSearch(
 		degraded.push("graph");
 	}
 
-	let results = retrieval.documents.map((document) =>
-		toResult(query, document),
-	);
+	// The Entity-Aware Ranking Layer.
+	//
+	// After retrieval and after reranking, changing neither. Placed here rather
+	// than inside the retriever because both result sets are already merged at
+	// this point and because entities have just been resolved above — and, more
+	// importantly, it must run *before* generation. Citations are positional:
+	// the generator numbers sources by array index and `extractCitations`
+	// resolves `[n]` back to `results[n - 1]`, so reordering afterwards would
+	// silently repoint every citation in the answer.
+	const ranked = applyEntitySignals(retrieval.documents, {
+		intent,
+		entity: classification.navigation?.entity,
+		officialDomain: classification.navigation?.officialDomain,
+		confidence: classification.confidence,
+	});
+
+	let results = ranked.map((document) => toResult(query, document));
 
 	const capabilities = selectCapabilities(
 		retrieval.capabilities,
 		intent,
-		retrieval.documents[0]?.fusedScore ?? 0,
+		ranked[0]?.fusedScore ?? 0,
 	);
 
 	// ---- Generation --------------------------------------------------------

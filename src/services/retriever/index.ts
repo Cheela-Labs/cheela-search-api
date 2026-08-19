@@ -1,3 +1,4 @@
+import { matchesOfficial } from "@cheela/search-core";
 import type { Intent } from "../../contracts/intent.js";
 import type { Cache } from "../../infra/redis/cache.js";
 import { config } from "../../shared/config.js";
@@ -142,6 +143,13 @@ export type RetrieveOptions = {
 	intent: Intent;
 	entities: string[];
 	limit?: number;
+	/**
+	 * The domain a navigational query is asking for, when one is known.
+	 *
+	 * Read for exactly one decision — whether stage B runs — and for nothing
+	 * else. It does not enter a Vespa query, a rank profile, or a score.
+	 */
+	officialDomain?: string;
 	signal?: AbortSignal;
 };
 
@@ -292,7 +300,26 @@ export function createRetriever(deps: RetrieverDeps) {
 				fromIndex(entry.item, entry.score, entry.agreement),
 			);
 
-			if (confidence >= config.INDEX_CONFIDENCE_THRESHOLD) {
+			// A navigational query that did not find the site it named.
+			//
+			// The index can be *confident* and still not hold redis.io: `follow()`
+			// in the crawler never leaves a domain, so a domain nobody seeded is
+			// simply absent, and a confident answer made entirely of GitHub pages
+			// is exactly what that looks like from here. Upstream providers do
+			// hold it, so this is the one case where high index confidence is not
+			// a reason to stop.
+			//
+			// Narrow on purpose: only a navigational query, only when an official
+			// domain is known, and only when no retrieved document matches it. A
+			// query whose official domain *was* found still short-circuits, so the
+			// external budget is spent on the case this exists to fix and no other.
+			const missingOfficial =
+				options.officialDomain !== undefined &&
+				!documents.some((document) =>
+					matchesOfficial(document.domain, options.officialDomain as string),
+				);
+
+			if (confidence >= config.INDEX_CONFIDENCE_THRESHOLD && !missingOfficial) {
 				// The architecture's "if confidence is high, return immediately".
 				// This is the path that makes the engine cheap and fast, and it is
 				// the one that gets more common as the index grows.

@@ -4,7 +4,7 @@ import { connectRedis } from "./infra/redis/client.js";
 import { config } from "./shared/config.js";
 import { logger } from "./shared/logger.js";
 import { startTelemetry, stopTelemetry } from "./shared/telemetry.js";
-import { buildDeps } from "./wiring.js";
+import { buildDeps, entityRegistry } from "./wiring.js";
 
 await startTelemetry();
 
@@ -13,6 +13,17 @@ await startTelemetry();
 // without Redis rather than refusing to start.
 await connectRedis().catch((error: Error) => {
 	logger.warn({ error: error.message }, "redis did not connect at startup");
+});
+
+// Warmed before the first request rather than on it. A cold registry does not
+// error — it returns no match, the query falls through to the model, and the
+// answer is a guess. That is precisely the failure that is invisible from
+// outside, so it is paid for here where a slow start is visible instead.
+entityRegistry.ready().catch((error: Error) => {
+	logger.warn(
+		{ error: error.message },
+		"entity registry did not load at startup; navigational queries will fall back to the model",
+	);
 });
 
 const app = createApp(buildDeps());
