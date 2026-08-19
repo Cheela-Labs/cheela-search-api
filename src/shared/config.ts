@@ -109,11 +109,69 @@ const schema = z.object({
 	 * whether the request had four hypotheses or one. The plain `hybrid`
 	 * queries all succeeded. The reranking one never did.
 	 *
-	 * Generous on purpose. `ranking.softtimeout` means Vespa returns what it
-	 * has at the deadline rather than failing, so a budget larger than needed
-	 * costs nothing, while one that is too small costs the whole query.
+	 * ## `softtimeout` does not cover this, and believing it did cost weeks
+	 *
+	 * This comment used to say the budget was "generous on purpose", because
+	 * `ranking.softtimeout` means Vespa returns what it has at the deadline
+	 * rather than failing — so an oversized budget costs nothing and an
+	 * undersized one costs only some ranking quality. That is true of the match
+	 * and first-rank phases. It is **not** true of the global phase or of
+	 * summary fetch. When the cross-encoder overran, Vespa did not return a
+	 * worse ordering; it returned an error:
+	 *
+	 *     No time left to get summaries, query timeout was 1971 ms
+	 *
+	 * — and the retriever counted that as a failed index query. So the budget is
+	 * not a quality dial with a safe upper bound. It is a hard cliff, and it has
+	 * to be set above what the global phase actually takes.
+	 *
+	 * 3000ms is that number for `rerank-count: 8` on the current node: typically
+	 * 1.7-1.9s, worst observed 2.75s across eight runs, including runs sharing
+	 * the node with the three-hypothesis fan-out. Both halves move together —
+	 * changing `rerank-count` in `web_document.sd` without changing this is how
+	 * the cliff gets rediscovered.
+	 *
+	 * Not raised further, and deliberately not raised to fit `rerank-count: 30`.
+	 * That would need seven seconds, and this budget sits on the *fast* path —
+	 * the one the architecture returns from immediately when confidence is high.
+	 * A seven-second fast path is not a fast path.
 	 */
-	VESPA_RERANK_TIMEOUT_MS: integer(2000),
+	VESPA_RERANK_TIMEOUT_MS: integer(3000),
+
+	/**
+	 * Whether to run the cross-encoder at all. Off, because it does nothing.
+	 *
+	 * `rerank_tokens` is declared in `web_document.sd` and is **absent from
+	 * every document in the index** — 121 sampled through `/document/v1`, not
+	 * one of them has it, while `chunk_embeddings` is present on all of them.
+	 * The cross-encoder therefore scores every pair with an empty document
+	 * side, and returns the same answer for all of them:
+	 *
+	 *     relevance = 0.10001073   colombia earthquake
+	 *     relevance = 0.10001122   semiconductor export controls
+	 *     relevance = 0.10001304   wildfire evacuation orders
+	 *
+	 * That is `0.9 × ~0.00001 + 0.1 × normalize_linear(firstPhase)` — the whole
+	 * ordering coming from the 10% first-phase term. Confirmed directly: the
+	 * top five documents come back in *identical* order with and without the
+	 * profile. It reorders nothing.
+	 *
+	 * Left on, it does active harm rather than nothing. `confidenceBasis`
+	 * prefers the reranked score because it is the calibrated one, so
+	 * confidence would read 0.1 against a 0.62 threshold and every search would
+	 * keep falling through to external providers — while the first-phase score
+	 * for the same queries is 3.07 out of a documented full house of 3.0, which
+	 * clears the threshold outright. So the index would stay unusable, for a
+	 * new reason, at a cost of 1.5s per search on the path whose whole purpose
+	 * is being the fast one.
+	 *
+	 * This is a flag rather than a deletion because everything else about the
+	 * setup is right — the profile, the model, the tokenizer component, the
+	 * budget. What is missing is the data. Populate `rerank_tokens`, re-feed,
+	 * confirm the ordering actually changes and that a relevant document scores
+	 * well above 0.1, and turn this on.
+	 */
+	VESPA_RERANK_ENABLED: booleanEnv(false),
 
 	GCS_RAW_BUCKET: z.string().min(1),
 

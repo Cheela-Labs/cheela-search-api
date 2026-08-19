@@ -19,7 +19,10 @@ import {
 	selectPassages,
 } from "../../src/services/ranking/index.js";
 import type { RetrievedDocument } from "../../src/services/retriever/index.js";
-import { indexConfidence } from "../../src/services/retriever/index.js";
+import {
+	confidenceBasis,
+	indexConfidence,
+} from "../../src/services/retriever/index.js";
 import type { IndexedCapability } from "../../src/services/retriever/vespa-stage.js";
 
 /* -------------------------------------------------------------------------- */
@@ -403,5 +406,87 @@ describe("indexConfidence", () => {
 		}));
 		expect(indexConfidence(many, true, 9)).toBeLessThanOrEqual(1);
 		expect(indexConfidence(many, false, 99)).toBeLessThanOrEqual(1);
+	});
+});
+
+describe("confidenceBasis", () => {
+	const entry = (rerank: boolean, ...scores: number[]) => ({
+		rerank,
+		result: { documents: scores.map((score) => ({ score })) },
+	});
+
+	it("reads the reranked hypothesis when it returned something", () => {
+		expect(
+			confidenceBasis([
+				entry(true, 0.8, 0.4),
+				entry(false, 2.9),
+				entry(false, 2.7),
+			]),
+		).toEqual({ topScore: 0.8, reranked: true });
+	});
+
+	it("falls back to the best un-reranked hypothesis when reranking failed", () => {
+		// The bug this is here for: the cross-encoder blew its budget on every
+		// request, so the reranked hypothesis returned nothing, topScore was 0,
+		// confidence was 0, and every search in production fell through to
+		// external providers while three healthy index queries sat unread.
+		expect(
+			confidenceBasis([entry(true), entry(false, 2.4), entry(false, 2.9)]),
+		).toEqual({ topScore: 2.9, reranked: false });
+	});
+
+	it("says which scale the score is on, so it is not read as saturated", () => {
+		const basis = confidenceBasis([entry(true), entry(false, 2.4)]);
+		expect(basis.reranked).toBe(false);
+		// 2.4 on the reranked scale would clamp to 1.0 and call this certain.
+		// On its own scale it is 0.8 of a full house, which is what it is.
+		expect(
+			indexConfidence(
+				[{ fusedScore: 1, features: {} }],
+				basis.reranked,
+				basis.topScore,
+			),
+		).toBeLessThan(
+			indexConfidence([{ fusedScore: 1, features: {} }], true, basis.topScore),
+		);
+	});
+
+	it("is zero when nothing returned anything", () => {
+		expect(confidenceBasis([entry(true), entry(false)])).toEqual({
+			topScore: 0,
+			reranked: false,
+		});
+		expect(confidenceBasis([])).toEqual({ topScore: 0, reranked: false });
+	});
+
+	it("clears the confidence threshold on the scores production actually returns", () => {
+		// The numbers this whole fix exists for, measured on the live index:
+		// first-phase top scores of 3.07 / 3.06 / 3.03 against a documented
+		// full house of 3.0, and a cross-encoder returning a flat 0.1 because
+		// `rerank_tokens` was never fed. Reading the 0.1 keeps the index out of
+		// service; reading the 3.07 puts it back in.
+		const documents = Array.from({ length: 6 }, () => ({
+			fusedScore: 1,
+			features: {},
+		}));
+
+		const basis = confidenceBasis([entry(false, 3.073), entry(false, 2.9)]);
+		expect(
+			indexConfidence(documents, basis.reranked, basis.topScore),
+		).toBeGreaterThan(0.62);
+
+		// And what it looked like before: the inert cross-encoder's 0.1.
+		expect(indexConfidence(documents, true, 0.1)).toBeLessThan(0.62);
+	});
+
+	it("never mixes a reranked score into the un-reranked maximum", () => {
+		// A reranked 0.9 must not out-rank an un-reranked 2.4: they are an order
+		// of magnitude apart and the fallback is explicitly on the second scale.
+		expect(
+			confidenceBasis([
+				{ rerank: true, result: { documents: [] } },
+				entry(false, 2.4),
+			]).topScore,
+		).toBe(2.4);
 	});
 });

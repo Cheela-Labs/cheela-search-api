@@ -76,6 +76,61 @@ export function indexConfidence(
 	return Math.min(1, topScore / 3) * (0.5 + 0.5 * depth);
 }
 
+/**
+ * Which hypothesis speaks for the index, and on which scale.
+ *
+ * Only one hypothesis reranks — the query as typed — so its top score is the
+ * calibrated one and is what confidence should be read from. The bug this
+ * exists to prevent is what happens when that one query fails.
+ *
+ * It used to be `stageA[0]?.result.documents[0]?.score ?? 0`, passed to
+ * `indexConfidence` with `reranked` hard-coded to `true`. When the cross-encoder
+ * blew its budget — which, on a two-vCPU node scoring 30 documents through a
+ * cross-encoder, was *every single request* — that hypothesis returned no
+ * documents, the score defaulted to 0, and `min(1, 0) × anything` is 0.
+ * Confidence was therefore always exactly zero, always below the 0.62
+ * threshold, and every search in production fell through to external providers.
+ * The other three hypotheses had queried Vespa successfully the whole time and
+ * their documents were sitting right there in the fusion; nothing ever looked
+ * at them. An index of 29,179 documents answering in 24ms could not win a
+ * single query, and the only outward symptom was `servedFrom: "external"`.
+ *
+ * So: prefer the reranked hypothesis, fall back to the best un-reranked one,
+ * and — this is the half that matters — say which scale the number is on. The
+ * two are an order of magnitude apart (0..1 against roughly 0..3), so returning
+ * a first-phase score while claiming it is reranked would read 2.4 as a
+ * saturated 1.0 and call every search confident. That is the same bug facing
+ * the other way.
+ *
+ * Taking the maximum across the un-reranked hypotheses is deliberate. They are
+ * rephrasings of one question, so the best evidence any of them found is the
+ * best the index has for what was asked. It reads slightly higher than a single
+ * query would, which is the right direction for a fallback: the alternative is
+ * abandoning a working index because the optional refinement step is down.
+ */
+export function confidenceBasis(
+	stage: { rerank: boolean; result: { documents: { score: number }[] } }[],
+): { topScore: number; reranked: boolean } {
+	const reranked = stage.find(
+		(entry) => entry.rerank && entry.result.documents.length > 0,
+	);
+	if (reranked) {
+		return { topScore: reranked.result.documents[0].score, reranked: true };
+	}
+
+	let topScore = 0;
+	for (const entry of stage) {
+		// Skipped rather than merged: a reranked score on the un-reranked scale
+		// would be divided by three. It contributes nothing here anyway — we are
+		// only in this branch because it returned no documents — but the skip is
+		// what makes the scale invariant true by construction rather than by
+		// coincidence.
+		if (entry.rerank) continue;
+		topScore = Math.max(topScore, entry.result.documents[0]?.score ?? 0);
+	}
+	return { topScore, reranked: false };
+}
+
 export type RetrieverDeps = {
 	index: IndexStage;
 	providers: SearchProvider[];
@@ -162,25 +217,52 @@ export function createRetriever(deps: RetrieverDeps) {
 
 			const stageA = await traced("retriever.stageA", async () =>
 				Promise.all(
-					hypotheses.map(async (hypothesis) => ({
-						hypothesis,
-						result: await deps.index.search(hypothesis.query, {
-							intent: options.intent,
-							entities: options.entities,
-							limit,
-							// Rerank only the query as typed. The cross-encoder is the
-							// most expensive thing in the budget and running it on four
-							// hypotheses would spend it four times to reorder lists that
-							// RRF is about to merge anyway.
-							rerank: hypothesis.source === "original",
-							signal: options.signal,
-						}),
-					})),
+					hypotheses.map(async (hypothesis) => {
+						// Rerank only the query as typed. The cross-encoder is the
+						// most expensive thing in the budget and running it on four
+						// hypotheses would spend it four times to reorder lists that
+						// RRF is about to merge anyway.
+						//
+						// Decided once and carried on the entry, so the thing that
+						// asks for reranking and the thing that reads the reranked
+						// score cannot drift apart. Re-deriving it from
+						// `hypothesis.source` in both places is how they would.
+						//
+						// Gated, and currently off: the cross-encoder scores every
+						// pair identically because `rerank_tokens` was never fed.
+						// See VESPA_RERANK_ENABLED for the measurements.
+						const rerank =
+							config.VESPA_RERANK_ENABLED && hypothesis.source === "original";
+
+						return {
+							hypothesis,
+							rerank,
+							result: await deps.index.search(hypothesis.query, {
+								intent: options.intent,
+								entities: options.entities,
+								limit,
+								rerank,
+								signal: options.signal,
+							}),
+						};
+					}),
 				),
 			);
 
-			if (stageA.some((entry) => entry.result.failed)) {
+			// Two different degradations, reported as two different words.
+			//
+			// They were one, and the conflation cost real time: production
+			// reported `degraded: ["vespa"]` on every search while Vespa was
+			// answering in 24ms with full coverage, because the only thing
+			// failing was the cross-encoder. "vespa" sent everyone looking at
+			// the index; the index was fine. If only the reranking hypothesis
+			// failed, say so — retrieval still happened, on the first-phase
+			// ranking, and that is a materially better state than no index at
+			// all.
+			if (stageA.some((entry) => !entry.rerank && entry.result.failed)) {
 				degraded.push("vespa");
+			} else if (stageA.some((entry) => entry.rerank && entry.result.failed)) {
+				degraded.push("rerank");
 			}
 
 			const indexed = reciprocalRankFusion(
@@ -196,14 +278,14 @@ export function createRetriever(deps: RetrieverDeps) {
 				stageA.flatMap((entry) => entry.result.capabilities),
 			);
 
-			const topScore = stageA[0]?.result.documents[0]?.score ?? 0;
+			const basis = confidenceBasis(stageA);
 			const confidence = indexConfidence(
 				indexed.map((entry) => ({
 					fusedScore: entry.score,
 					features: entry.item.features,
 				})),
-				true,
-				topScore,
+				basis.reranked,
+				basis.topScore,
 			);
 
 			const documents = indexed.map((entry) =>

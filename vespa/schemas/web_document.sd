@@ -291,7 +291,10 @@ schema web_document {
 		}
 	}
 
-	# The TDS's cross-encoder stage: top 30 candidates, reordered.
+	# The TDS's cross-encoder stage: the top candidates, reordered.
+	#
+	# The TDS says 30. This node cannot afford 30, and the gap between those two
+	# facts took the index out of service entirely — see `rerank-count` below.
 	rank-profile hybrid-rerank inherits hybrid {
 
 		function my_input_ids() {
@@ -311,7 +314,37 @@ schema web_document {
 		}
 
 		global-phase {
-			rerank-count: 30
+			# Eight, not the TDS's thirty, and this is a hardware statement rather
+			# than a ranking one.
+			#
+			# The cross-encoder costs a flat ~195ms per document on this node —
+			# two vCPUs, no GPU, 256 tokens a pair. Measured on the live index:
+			#
+			#     rerank-count   querytime
+			#     30             5.85s
+			#     16             3.16s
+			#      8             1.72s
+			#      4             0.85s
+			#
+			# Dead linear, because it is one forward pass per candidate and there
+			# is no batching to amortise. At 30 the query took six seconds against
+			# a two-second budget and failed *every single time* — which, through
+			# the confidence calculation in `retriever/index.ts`, meant the index
+			# never served a result at all. A ranking refinement nobody could
+			# afford was quietly disabling the thing it was refining.
+			#
+			# Eight is what fits with margin: typically 1.7-1.9s, worst observed
+			# 2.75s, against VESPA_RERANK_TIMEOUT_MS of 3000ms. Reranking 8 of the
+			# ~137 documents a typical query matches is genuinely less than 30 —
+			# the cross-encoder can only promote what it looks at — but it is the
+			# depth this node can pay for, and the tail is now caught by the
+			# un-reranked fallback rather than by disabling retrieval.
+			#
+			# Raise this when the node gets more CPU, and only then. The number is
+			# a function of the hardware, so measure again rather than guessing:
+			# a query-time `ranking.globalPhase.rerankCount` override reproduces
+			# the table above without redeploying anything.
+			rerank-count: 8
 			# Mostly the cross-encoder, with enough of the first phase left in to
 			# break ties and to stop a single confidently-wrong pair inversion
 			# from burying a document every other signal agreed on.
