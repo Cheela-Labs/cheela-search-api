@@ -390,14 +390,28 @@ export function createRetriever(deps: RetrieverDeps) {
 			// Index results keep their place ahead of external ones at equal
 			// evidence: we have read those pages, so their titles and snippets
 			// are ours rather than a vendor's summary of them.
+			//
+			// "At equal evidence" is doing real work in that sentence, and one
+			// case is not equal: an external result *on the domain a
+			// navigational query named*. Without this it was fetched and then
+			// discarded before anything could rank it — the index returned a
+			// full page of 20, `slice(0, limit)` cut the external list off
+			// entirely, and `redis` came back as twenty github.com URLs with
+			// redis.io nowhere in the response despite stage B having just gone
+			// and got it.
 			const seen = new Set(documents.map((document) => document.url));
+			const externalDocuments = fusedExternal
+				.filter((entry) => !seen.has(entry.item.url))
+				.map((entry) => fromExternal(entry.item, entry.score, entry.agreement));
+
+			const isOfficial = (document: RetrievedDocument): boolean =>
+				options.officialDomain !== undefined &&
+				matchesOfficial(document.domain, options.officialDomain);
+
 			const combined = [
+				...externalDocuments.filter(isOfficial),
 				...documents,
-				...fusedExternal
-					.filter((entry) => !seen.has(entry.item.url))
-					.map((entry) =>
-						fromExternal(entry.item, entry.score, entry.agreement),
-					),
+				...externalDocuments.filter((document) => !isOfficial(document)),
 			];
 
 			return {
