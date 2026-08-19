@@ -164,20 +164,21 @@ describe("gating", () => {
 		);
 	});
 
-	it("still demotes encyclopaedic domains when no official domain is known", () => {
-		// A confident navigational intent with no registry hit — the user wants a
-		// destination and we cannot say which. Demoting the sites that answer
-		// every navigational query with an article is still the right direction,
-		// so this is deliberately not a no-op. Nothing is boosted; something is
-		// softly moved.
+	it("does nothing at all when no official domain is known", () => {
+		// This used to demote encyclopaedic domains on any confident navigational
+		// intent, registry hit or not. Production showed why that is wrong:
+		// `redis wiki` is classified navigation by the model and resolves to no
+		// entity, and the penalty moved en.wikipedia.org from first to fourth —
+		// for a query whose author had written "wiki" in it. With no official
+		// site to protect, the penalty has no counterparty and is pure harm.
 		const documents = [
+			doc("https://en.wikipedia.org/wiki/Redis"),
 			doc("https://github.com/topics/whatever"),
 			doc("https://example.com/x"),
 		];
-		expect(order(documents, { intent: "navigation", confidence: 1 })).toEqual([
-			"https://example.com/x",
-			"https://github.com/topics/whatever",
-		]);
+		expect(order(documents, { intent: "navigation", confidence: 1 })).toEqual(
+			documents.map((entry) => entry.url),
+		);
 	});
 
 	it("boosts nothing when no official domain is known", () => {

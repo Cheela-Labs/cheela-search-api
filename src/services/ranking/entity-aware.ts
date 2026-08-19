@@ -184,8 +184,20 @@ export function scoreWithEntitySignals(
 	// The gate. Below `CONFIDENT` the intent is a guess, and this layer's
 	// adjustments are large enough that acting on a guess actively reorders
 	// results away from what was asked.
+	//
+	// An official domain is required, not just a navigational intent. The
+	// penalties exist to stop an encyclopaedia outranking *the official site*;
+	// with no official site identified there is nothing to protect and the
+	// demotion has no counterparty. Measured: `redis wiki` is classified
+	// navigation by the model with confidence 1 and resolves to no entity — the
+	// modifier list correctly refuses it — and the penalty moved
+	// en.wikipedia.org from first to fourth for a query whose author had named
+	// Wikipedia in the query. The user asked for the encyclopaedia; demoting it
+	// to protect a site we could not name is the layer doing harm on a guess.
 	const navigational =
-		signals.intent === "navigation" && signals.confidence >= CONFIDENT;
+		signals.intent === "navigation" &&
+		signals.confidence >= CONFIDENT &&
+		Boolean(signals.officialDomain);
 
 	return documents.map((document) => {
 		const score = base.get(document.url) ?? 0;
