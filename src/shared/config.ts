@@ -264,8 +264,31 @@ const schema = z.object({
 	MAX_HYPOTHESES: integer(4),
 	/** The TDS's cross-encoder stage: top 30. */
 	RERANK_COUNT: integer(30),
-	/** Below this, stage A is not enough and external providers are called. */
-	INDEX_CONFIDENCE_THRESHOLD: z.coerce.number().min(0).max(1).default(0.62),
+	/**
+	 * Below this, stage A is not enough and external providers are called.
+	 *
+	 * 0.75, not the original 0.62, because what confidence *means* changed. It
+	 * used to be the total first-phase relevance over three; it is now the
+	 * larger of `lexical` and `semantic` — the part of the score that is
+	 * actually about the query. The old number was calibrated against the old
+	 * scale and carrying it over unchanged left the threshold sitting on the
+	 * noise floor.
+	 *
+	 * The floor is measurable. On the current corpus an unrelated document
+	 * scores 0.59-0.61 on this axis — `colombia earthquake` gave 0.593 and
+	 * `semiconductor export controls` 0.611, both against pages titled "Build
+	 * software better, together". At 0.62 the decision to call a vendor was
+	 * therefore decided by which hypothesis the evolution model happened to
+	 * generate, and the same query flipped between `index` and `mixed` between
+	 * one deploy and the next.
+	 *
+	 * 0.75 clears that floor with room, and still admits a genuinely strong
+	 * match — a real keyword hit reaches 0.85+ and a real semantic one 0.8+.
+	 * It will move again when the corpus is not one domain: this is the number
+	 * that says "the index may answer without help", and the honest value for
+	 * it depends on how much the index actually knows.
+	 */
+	INDEX_CONFIDENCE_THRESHOLD: z.coerce.number().min(0).max(1).default(0.75),
 
 	// ---- Telemetry ---------------------------------------------------------
 
