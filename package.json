@@ -21,7 +21,7 @@
 	},
 	"dependencies": {
 		"@cheela/adp": "^0.1.0",
-		"@cheela/search-core": "^0.2.0",
+		"@cheela/search-core": "^0.2.1",
 		"@google-cloud/opentelemetry-cloud-trace-exporter": "^3.0.0",
 		"@google-cloud/storage": "^7.14.0",
 		"@hono/node-server": "^2.0.10",
