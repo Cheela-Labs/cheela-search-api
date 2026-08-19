@@ -129,7 +129,13 @@ export function createEntityRegistry(deps: EntityRegistryDeps) {
 					{ error: error.message, entries: byAlias.size },
 					"entity registry refresh failed; serving the previous map",
 				);
-				loadedAt = Date.now();
+				// Deliberately *not* stamping `loadedAt` on a failure when the map
+				// is empty. Marking a failed cold load as fresh is what turns one
+				// bad minute at startup into a permanently empty registry; leaving
+				// it stale means the next tick tries again. When there is a
+				// previous map to serve, the stamp is fine — that is a real cache,
+				// not an absence.
+				if (byAlias.size > 0) loadedAt = Date.now();
 			})
 			.finally(() => {
 				loading = null;
@@ -137,10 +143,37 @@ export function createEntityRegistry(deps: EntityRegistryDeps) {
 		await loading;
 	}
 
+	let timer: NodeJS.Timeout | null = null;
+
 	return {
-		/** Warms the map. Called at startup so the first query does not pay for it. */
+		/**
+		 * Warms the map, and keeps it warm.
+		 *
+		 * The timer is the point, and it was missing at first: this comment said
+		 * "refreshed on a timer" while nothing ever called `refresh` after
+		 * startup. A revision that came up before the registry's own migration
+		 * had run therefore loaded nothing, logged one warning, and served an
+		 * empty map for the life of the process — every navigational query
+		 * falling through to the model, silently, exactly as if the feature had
+		 * never been deployed. That is what shipped, and it is why this is a
+		 * loop rather than a single call.
+		 *
+		 * `unref` so a Job or a test that finishes its work is not held open by
+		 * a pending refresh.
+		 */
 		async ready(): Promise<void> {
 			await refresh();
+			if (timer) clearInterval(timer);
+			timer = setInterval(() => {
+				void refresh();
+			}, ttlMs);
+			timer.unref();
+		},
+
+		/** Stops the refresh loop. For tests and for shutdown. */
+		stop(): void {
+			if (timer) clearInterval(timer);
+			timer = null;
 		},
 
 		/**
