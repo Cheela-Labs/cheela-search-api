@@ -55,15 +55,45 @@ export type Retrieval = {
  * How much to trust what the index returned.
  *
  * With the cross-encoder this is close to a calibrated number — the global
- * phase is mostly `sigmoid(logit)`, which is a relevance probability. Without
- * it the first-phase score is a sum of seven bounded terms with no upper bound
- * that means anything, so it is combined with *how many* results cleared a
- * floor: one good hit is a lucky match, six is an index that knows this topic.
+ * phase is mostly `sigmoid(logit)`, which is a relevance probability.
+ *
+ * ## Without it, the total relevance is the wrong number to read
+ *
+ * The first-phase score is
+ *
+ *     intent_boost x (lexical + semantic + authority + freshness
+ *                     + entity_boost + graph_boost)
+ *
+ * and only two of those terms are about the query. Measured on the live index
+ * for "colombia earthquake", against a corpus that is 99% github.com:
+ *
+ *     relevance 3.095   "Build software better, together"
+ *       lexical   0.518   semantic  0.593    <- the query-dependent half
+ *       authority 0.550   freshness 0.500    <- identical on every document
+ *       graph     0.935                      <- the document's own importance
+ *
+ * Roughly two points of that three arrive before the document has matched
+ * anything. Dividing the total by three therefore reported ~1.0 for a page
+ * whose title is GitHub's tagline, the threshold was cleared, stage B never
+ * ran, and a news query returned twenty github.com URLs while the providers
+ * that had the actual news were never called. The same query and `redis`
+ * produced near-identical lexical and semantic values — the signature of a
+ * corpus in which everything is equally irrelevant to everything.
+ *
+ * So this reads the match, not the sum. `lexical` is a saturating BM25 and
+ * `semantic` is closeness, both already 0..1 and both already about this
+ * query; the rest is what makes a document good in general, which is a
+ * different question from whether it answers what was asked.
+ *
+ * The larger of the two rather than their mean, because hybrid retrieval means
+ * either signal can carry a match on its own — `semantic` is 0 for a document
+ * found only lexically, and averaging would halve a perfect keyword hit.
  */
 export function indexConfidence(
 	documents: { fusedScore: number; features: Record<string, number> }[],
 	reranked: boolean,
 	topScore: number,
+	features: Record<string, number> = {},
 ): number {
 	if (documents.length === 0) return 0;
 
@@ -72,9 +102,9 @@ export function indexConfidence(
 		// The reranked score is already 0..1 and already about this query.
 		return Math.min(1, topScore) * (0.6 + 0.4 * depth);
 	}
-	// 3.0 is a full house on the un-reranked scale: seven terms, most of which
-	// are neutral for a typical document.
-	return Math.min(1, topScore / 3) * (0.5 + 0.5 * depth);
+
+	const match = Math.max(features.lexical ?? 0, features.semantic ?? 0);
+	return Math.min(1, match) * (0.5 + 0.5 * depth);
 }
 
 /**
@@ -110,16 +140,29 @@ export function indexConfidence(
  * abandoning a working index because the optional refinement step is down.
  */
 export function confidenceBasis(
-	stage: { rerank: boolean; result: { documents: { score: number }[] } }[],
-): { topScore: number; reranked: boolean } {
+	stage: {
+		rerank: boolean;
+		result: {
+			documents: { score: number; features?: Record<string, number> }[];
+		};
+	}[],
+): { topScore: number; reranked: boolean; features: Record<string, number> } {
 	const reranked = stage.find(
 		(entry) => entry.rerank && entry.result.documents.length > 0,
 	);
 	if (reranked) {
-		return { topScore: reranked.result.documents[0].score, reranked: true };
+		const top = reranked.result.documents[0];
+		return {
+			topScore: top.score,
+			reranked: true,
+			features: top.features ?? {},
+		};
 	}
 
+	// The features come from the same document the score does, so confidence is
+	// read off one hit rather than assembled from two.
 	let topScore = 0;
+	let features: Record<string, number> = {};
 	for (const entry of stage) {
 		// Skipped rather than merged: a reranked score on the un-reranked scale
 		// would be divided by three. It contributes nothing here anyway — we are
@@ -127,9 +170,13 @@ export function confidenceBasis(
 		// what makes the scale invariant true by construction rather than by
 		// coincidence.
 		if (entry.rerank) continue;
-		topScore = Math.max(topScore, entry.result.documents[0]?.score ?? 0);
+		const top = entry.result.documents[0];
+		if (top && top.score > topScore) {
+			topScore = top.score;
+			features = top.features ?? {};
+		}
 	}
-	return { topScore, reranked: false };
+	return { topScore, reranked: false, features };
 }
 
 export type RetrieverDeps = {
@@ -294,6 +341,7 @@ export function createRetriever(deps: RetrieverDeps) {
 				})),
 				basis.reranked,
 				basis.topScore,
+				basis.features,
 			);
 
 			const documents = indexed.map((entry) =>

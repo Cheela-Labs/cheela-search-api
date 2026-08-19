@@ -422,7 +422,7 @@ describe("confidenceBasis", () => {
 				entry(false, 2.9),
 				entry(false, 2.7),
 			]),
-		).toEqual({ topScore: 0.8, reranked: true });
+		).toMatchObject({ topScore: 0.8, reranked: true });
 	});
 
 	it("falls back to the best un-reranked hypothesis when reranking failed", () => {
@@ -432,7 +432,7 @@ describe("confidenceBasis", () => {
 		// external providers while three healthy index queries sat unread.
 		expect(
 			confidenceBasis([entry(true), entry(false, 2.4), entry(false, 2.9)]),
-		).toEqual({ topScore: 2.9, reranked: false });
+		).toMatchObject({ topScore: 2.9, reranked: false });
 	});
 
 	it("says which scale the score is on, so it is not read as saturated", () => {
@@ -452,27 +452,84 @@ describe("confidenceBasis", () => {
 	});
 
 	it("is zero when nothing returned anything", () => {
-		expect(confidenceBasis([entry(true), entry(false)])).toEqual({
+		expect(confidenceBasis([entry(true), entry(false)])).toMatchObject({
 			topScore: 0,
 			reranked: false,
 		});
-		expect(confidenceBasis([])).toEqual({ topScore: 0, reranked: false });
+		expect(confidenceBasis([])).toMatchObject({ topScore: 0, reranked: false });
 	});
 
-	it("clears the confidence threshold on the scores production actually returns", () => {
-		// The numbers this whole fix exists for, measured on the live index:
-		// first-phase top scores of 3.07 / 3.06 / 3.03 against a documented
-		// full house of 3.0, and a cross-encoder returning a flat 0.1 because
-		// `rerank_tokens` was never fed. Reading the 0.1 keeps the index out of
-		// service; reading the 3.07 puts it back in.
+	it("is not confident about a mediocre match, however high the total score", () => {
+		// The numbers that took the whole engine over: "colombia earthquake"
+		// against a 99%-github.com corpus returned a page titled "Build software
+		// better, together" at relevance 3.095 — of which authority 0.550,
+		// freshness 0.500 and graph 0.935 arrive before the document has matched
+		// anything. Reading the total said 1.0 and served twenty GitHub URLs for
+		// a news query. Reading the match says otherwise.
+		const documents = Array.from({ length: 20 }, () => ({
+			fusedScore: 1,
+			features: {},
+		}));
+		const measured = { lexical: 0.518, semantic: 0.593 };
+
+		expect(indexConfidence(documents, false, 3.095, measured)).toBeLessThan(
+			0.62,
+		);
+	});
+
+	it("is confident about a strong match on either signal alone", () => {
+		const documents = Array.from({ length: 6 }, () => ({
+			fusedScore: 1,
+			features: {},
+		}));
+		// Lexical-only: `semantic` is 0 for a document found by keywords alone,
+		// and averaging the two would halve a perfect keyword hit.
+		expect(
+			indexConfidence(documents, false, 2.4, { lexical: 0.92, semantic: 0 }),
+		).toBeGreaterThan(0.62);
+		// Semantic-only, the mirror case.
+		expect(
+			indexConfidence(documents, false, 2.4, { lexical: 0, semantic: 0.9 }),
+		).toBeGreaterThan(0.62);
+	});
+
+	it("is not confident when no features came back at all", () => {
+		// External documents carry `features: {}`. Treating an absent match as a
+		// perfect one is the failure mode this replaced.
+		const documents = Array.from({ length: 20 }, () => ({
+			fusedScore: 1,
+			features: {},
+		}));
+		expect(indexConfidence(documents, false, 3.1, {})).toBe(0);
+	});
+
+	it("clears the confidence threshold when the match itself is strong", () => {
+		// The fallback must still be able to serve from the index. What changed
+		// is *which number* it reads: a strong lexical and semantic match, not a
+		// total dominated by authority, freshness and graph importance.
 		const documents = Array.from({ length: 6 }, () => ({
 			fusedScore: 1,
 			features: {},
 		}));
 
-		const basis = confidenceBasis([entry(false, 3.073), entry(false, 2.9)]);
+		const basis = confidenceBasis([
+			{
+				rerank: false,
+				result: {
+					documents: [
+						{ score: 3.073, features: { lexical: 0.88, semantic: 0.79 } },
+					],
+				},
+			},
+			entry(false, 2.9),
+		]);
 		expect(
-			indexConfidence(documents, basis.reranked, basis.topScore),
+			indexConfidence(
+				documents,
+				basis.reranked,
+				basis.topScore,
+				basis.features,
+			),
 		).toBeGreaterThan(0.62);
 
 		// And what it looked like before: the inert cross-encoder's 0.1.
