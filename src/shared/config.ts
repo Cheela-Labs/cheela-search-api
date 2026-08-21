@@ -77,8 +77,29 @@ const schema = z.object({
 	 * rather than an error. The HTTP client waits longer, by
 	 * `VESPA_TRANSPORT_MARGIN_MS` — see `infra/vespa/client.ts` for why the
 	 * two cannot be the same number.
+	 *
+	 * ## Why 800 and not 400
+	 *
+	 * 400 was survivable when the index was small and stopped being so as it
+	 * grew. Measured on production, ten queries spanning news, health, food,
+	 * research, travel, sport and code: `degraded: ["vespa"]` and
+	 * `servedFrom: "external"` on **ten of ten**, with `/health` reporting
+	 * Vespa reachable throughout. The index was contributing nothing to any
+	 * query while appearing healthy from the outside.
+	 *
+	 * `softtimeout` does not rescue this. It covers match and first-phase
+	 * ranking; the summary fetch that follows is outside it, which is why the
+	 * failure arrives as `Summary data is incomplete` rather than as a thin
+	 * result set. Widening the budget is the only thing that gives the summary
+	 * fetch room.
+	 *
+	 * This is the index stage's budget, not the request's — a query that
+	 * exhausts it still falls through to external retrieval, so the ceiling on
+	 * what a reader waits is unchanged. If 800 turns out not to be enough, that
+	 * is the evidence for giving `cheela-vespa` more than two vCPUs rather than
+	 * for widening this again.
 	 */
-	VESPA_TIMEOUT_MS: integer(400),
+	VESPA_TIMEOUT_MS: integer(800),
 	/**
 	 * How much longer the client waits than Vespa does.
 	 *
