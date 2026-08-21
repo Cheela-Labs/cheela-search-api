@@ -198,11 +198,18 @@ export async function runSearch(
 		results,
 		capabilities,
 		citations: generated.citations,
+		comparison: generated.comparison,
 		followUp: context.followUp,
 		intent: {
 			intent: classification.intent,
 			confidence: classification.confidence,
 			entities: classification.entities,
+			// Already computed by the structural pass and already used for
+			// ranking; sent so a navigational query can render the destination it
+			// resolved to rather than making the surface guess which result was
+			// the official one.
+			officialDomain: classification.navigation?.officialDomain,
+			officialUrl: classification.navigation?.officialUrl,
 		},
 		entities,
 		sessionId: context.sessionId,

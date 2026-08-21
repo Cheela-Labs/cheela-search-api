@@ -236,14 +236,27 @@ export function createGraph(deps: GraphDeps) {
 			if (cached) return cached;
 
 			try {
+				// The five columns below `popularity` are what the surface renders a
+				// knowledge card from. They have been on `graph.entities` since
+				// migration 0005 and this query selected around them, so every
+				// entity reaching a client was a name and a type and nothing a
+				// reader could use. New columns on an already-granted table need no
+				// new grant — see that migration's own note.
 				const { rows } = await deps.pool.query<{
 					entity_id: string;
 					name: string;
 					node_type: string;
 					aliases: string[];
 					popularity: number;
+					description: string | null;
+					official_domain: string | null;
+					official_url: string | null;
+					favicon_url: string | null;
+					same_as: string[] | null;
 				}>(
-					`SELECT entity_id, name, node_type, aliases, popularity
+					`SELECT entity_id, name, node_type, aliases, popularity,
+					        description, official_domain, official_url, favicon_url,
+					        same_as
 					   FROM graph.entities
 					  WHERE lower(name) = ANY($1) OR aliases && $2
 					  ORDER BY popularity DESC
@@ -257,6 +270,14 @@ export function createGraph(deps: GraphDeps) {
 					type: row.node_type,
 					aliases: row.aliases,
 					popularity: row.popularity,
+					// Undefined rather than null or "": the wire type says optional,
+					// and an empty description that renders as an empty line is the
+					// thing the surface most needs to be able to test for.
+					description: row.description || undefined,
+					officialDomain: row.official_domain || undefined,
+					officialUrl: row.official_url || undefined,
+					faviconUrl: row.favicon_url || undefined,
+					sameAs: row.same_as?.length ? row.same_as : undefined,
 				}));
 
 				void deps.cache?.put(key, entities);

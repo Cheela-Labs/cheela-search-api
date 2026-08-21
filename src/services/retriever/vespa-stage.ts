@@ -7,6 +7,7 @@ import {
 } from "../../contracts/intent.js";
 import { config } from "../../shared/config.js";
 import { logger } from "../../shared/logger.js";
+import { readStructured, type StructuredNode } from "../structured/index.js";
 
 /**
  * Stage A: our own index.
@@ -35,6 +36,18 @@ export type IndexedDocument = {
 	publishedAt: number;
 	score: number;
 	features: Record<string, number>;
+	/** The page's own `<meta name="description">`, when it had one. */
+	description: string;
+	/** H1-H6 in document order: the author's own outline of the page. */
+	headings: string[];
+	/**
+	 * What the page published about itself in JSON-LD, parsed and pruned.
+	 *
+	 * The crawler has written this to `web_document.jsonld` since the schema was
+	 * first deployed and nothing selected it until now, which is why every
+	 * result module that wants a date, a price or a venue had nothing to read.
+	 */
+	structured: StructuredNode[];
 };
 
 export type IndexedCapability = {
@@ -49,6 +62,13 @@ export type IndexedCapability = {
 	callable: boolean;
 	score: number;
 };
+
+const asStrings = (value: unknown): string[] =>
+	Array.isArray(value)
+		? (value as unknown[]).filter(
+				(entry): entry is string => typeof entry === "string",
+			)
+		: [];
 
 const asString = (value: unknown, fallback = ""): string =>
 	typeof value === "string" ? value : fallback;
@@ -74,16 +94,18 @@ export function toDocument(hit: VespaHit): IndexedDocument {
 		path: asString(fields.path),
 		title: asString(fields.title),
 		body: asString(fields.body),
-		chunks: Array.isArray(fields.chunks)
-			? (fields.chunks as unknown[]).filter(
-					(chunk): chunk is string => typeof chunk === "string",
-				)
-			: [],
+		chunks: asStrings(fields.chunks),
 		image: asString(fields.image) || undefined,
 		authority: asNumber(fields.authority, 0.5),
 		publishedAt: asNumber(fields.published_at),
 		score: hit.relevance,
 		features: features(hit),
+		description: asString(fields.description),
+		headings: asStrings(fields.headings),
+		// Parsed here rather than at the edge: this is the one place a Vespa hit
+		// becomes a typed thing, and a stranger's JSON should stop being a string
+		// as early as it possibly can.
+		structured: readStructured(asString(fields.jsonld)),
 	};
 }
 
@@ -142,7 +164,13 @@ export function createIndexStage(vespa: VespaClient) {
 		const result = await vespa.query(
 			{
 				yql:
-					"select doc_id, url, domain, path, title, body, chunks, image, authority, published_at " +
+					// `jsonld`, `description` and `headings` have been summary fields
+					// on `web_document` since the schema was written and were simply
+					// never selected. Adding them costs one summary read per hit and
+					// is the whole supply of structured data the result modules
+					// render from.
+					"select doc_id, url, domain, path, title, body, chunks, image, authority, published_at, " +
+					"jsonld, description, headings " +
 					"from web_document where userQuery() or ({targetHits:100}nearestNeighbor(chunk_embeddings, q))",
 				query,
 				type: "weakAnd",

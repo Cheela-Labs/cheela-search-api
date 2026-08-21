@@ -1,4 +1,6 @@
 import { z } from "zod";
+import type { Comparison } from "../services/generator/index.js";
+import type { StructuredNode } from "../services/structured/index.js";
 import { type Intent, intentSchema } from "./intent.js";
 
 /**
@@ -71,6 +73,29 @@ export type Result = {
 	capabilities?: CapabilityRef[];
 	/** Which retrieval path produced this — for debugging and for the eval harness. */
 	source: "index" | "external";
+	/**
+	 * Additive. What the page published about itself in JSON-LD, parsed,
+	 * type-filtered and capped by `services/structured`.
+	 *
+	 * Absent means one of two things and the difference matters to a surface:
+	 * either the page carried no markup we read, or this is an external result
+	 * and we never fetched the page at all — `source` tells them apart.
+	 *
+	 * A publisher's claim about their own page, never a fact. Anything rendered
+	 * from it belongs attributed to `domain`.
+	 */
+	structured?: StructuredNode[];
+	/** Additive. The page's own `<meta name="description">`. */
+	description?: string;
+	/**
+	 * Additive. H1-H6 in document order — the author's own outline of the page.
+	 *
+	 * Indexed since the schema was written and, like `jsonld`, never selected.
+	 * It is the only structured thing most documentation pages publish: almost
+	 * none carry `TechArticle` markup, and nearly all carry a heading per
+	 * section.
+	 */
+	headings?: string[];
 };
 
 export type CapabilityHit = {
@@ -100,6 +125,22 @@ export type EntityRef = {
 	type: string;
 	aliases: string[];
 	popularity: number;
+	/**
+	 * The graph's own one-line account of this thing.
+	 *
+	 * Additive, and the reason the surface can render a knowledge card at all:
+	 * a name and a type describe nothing. Written by the crawler from the
+	 * publisher's own `Organization`/`SoftwareApplication` markup, longest
+	 * wins — see `knowledge-graph/store.ts`.
+	 */
+	description?: string;
+	/** Apex form, `www.` stripped. Which domain officially speaks for this name. */
+	officialDomain?: string;
+	/** The homepage as the publisher writes it, scheme and all. */
+	officialUrl?: string;
+	faviconUrl?: string;
+	/** schema.org `sameAs`: the publisher's own list of their other profiles. */
+	sameAs?: string[];
 };
 
 export type SearchResponse = {
@@ -111,10 +152,32 @@ export type SearchResponse = {
 	/** Whether this query was read as continuing the previous one. */
 	followUp: boolean;
 
+	/**
+	 * Additive. A side-by-side table, present only on a comparison query and
+	 * only when the model returned one whose shape was intact.
+	 *
+	 * Composed from the sources rather than extracted from any one of them,
+	 * which is why it is a separate key rather than another `Result` field: a
+	 * surface has to be able to label it as our reading rather than as a
+	 * publisher's claim.
+	 */
+	comparison?: Comparison;
+
 	// ---- Additive, documented superset ------------------------------------
 
 	/** The classification, exposed because the surface renders it. */
-	intent: { intent: Intent; confidence: number; entities: string[] };
+	intent: {
+		intent: Intent;
+		confidence: number;
+		entities: string[];
+		/**
+		 * Additive. Where a navigational query resolved to, when the structural
+		 * pass resolved it — a typed hostname, or a name the entity registry
+		 * holds an official domain for.
+		 */
+		officialDomain?: string;
+		officialUrl?: string;
+	};
 	/** The generator receives these, so the surface may have them too. */
 	entities: EntityRef[];
 	/** Echoed so a client that sent none can send this one back next time. */

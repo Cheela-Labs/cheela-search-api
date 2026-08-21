@@ -31,7 +31,13 @@ import { logger } from "../../shared/logger.js";
  * would make an implementation detail part of the API the first time somebody
  * serialised it.
  */
-export type Navigation = { entity: string; officialDomain: string };
+export type Navigation = {
+	/** The name recognised, when a name was. A typed hostname resolves no name. */
+	entity?: string;
+	officialDomain: string;
+	/** The homepage, when the registry holds one or the reader typed one. */
+	officialUrl?: string;
+};
 
 export type ClassifiedQuery = Classification & { navigation?: Navigation };
 
@@ -52,6 +58,7 @@ export type Structural = {
 	/** Set when a known entity name was recognised. */
 	entity?: string;
 	officialDomain?: string;
+	officialUrl?: string;
 } | null;
 
 /**
@@ -120,7 +127,11 @@ const MAX_NAVIGATIONAL_WORDS = 3;
 
 export type StructuralDeps = {
 	/** Synchronous on purpose — see the registry's own comment. */
-	lookup(surface: string): { name: string; officialDomain: string } | null;
+	lookup(surface: string): {
+		name: string;
+		officialDomain: string;
+		officialUrl?: string | null;
+	} | null;
 };
 
 export function classifyStructurally(
@@ -142,6 +153,7 @@ export function classifyStructurally(
 				intent: "navigation",
 				url,
 				officialDomain: match[1].toLowerCase(),
+				officialUrl: url,
 			};
 		}
 	}
@@ -170,6 +182,7 @@ export function classifyStructurally(
 				intent: "navigation",
 				entity: entity.name,
 				officialDomain: entity.officialDomain,
+				officialUrl: entity.officialUrl ?? undefined,
 			};
 		}
 	}
@@ -244,11 +257,17 @@ export function createClassifier(
 				intent: structural.intent,
 				confidence: 1,
 				entities: structural.entity ? [structural.entity] : [],
-				...(structural.entity && structural.officialDomain
+				// Keyed on the domain alone, not on the domain *and* a name. A
+				// typed hostname resolves the most precise destination there is
+				// and recognises no entity, so requiring both meant `redis.io`
+				// carried no navigation at all — the one query where the answer
+				// is unambiguous was the one where nothing was passed on.
+				...(structural.officialDomain
 					? {
 							navigation: {
 								entity: structural.entity,
 								officialDomain: structural.officialDomain,
+								officialUrl: structural.officialUrl,
 							},
 						}
 					: {}),

@@ -6,6 +6,7 @@ import { logger } from "../../shared/logger.js";
 import { traced } from "../../shared/telemetry.js";
 import type { Hypothesis } from "../evolution/index.js";
 import { reciprocalRankFusion } from "../evolution/rrf.js";
+import type { StructuredNode } from "../structured/index.js";
 import { type Candidate, fanout, type SearchProvider } from "./providers.js";
 import type {
 	IndexedCapability,
@@ -41,6 +42,12 @@ export type RetrievedDocument = {
 	fusedScore: number;
 	agreement: number;
 	features: Record<string, number>;
+	/** The page's own meta description. Empty for an external result. */
+	description: string;
+	/** The page's heading outline. Empty for an external result. */
+	headings: string[];
+	/** What the page published about itself. Empty for an external result. */
+	structured: StructuredNode[];
 };
 
 export type Retrieval = {
@@ -222,6 +229,9 @@ const fromIndex = (
 	fusedScore,
 	agreement,
 	features: document.features,
+	description: document.description,
+	headings: document.headings,
+	structured: document.structured,
 });
 
 const fromExternal = (
@@ -249,8 +259,16 @@ const fromExternal = (
 	snippet: candidate.snippet,
 	// External results carry no body: this is a list of places to read, and
 	// the reading happens in the indexer, off the request path.
+	//
+	// The same sentence covers the three below it. A provider hands back a
+	// title, a URL and a summary; we never fetched the page, so there is no
+	// markup of its own to have read. Empty here is a fact about what we did,
+	// not a gap to be filled in from somewhere else.
 	body: "",
 	chunks: [],
+	description: "",
+	headings: [],
+	structured: [],
 	authority: 0.5,
 	publishedAt: 0,
 	origin: "external",

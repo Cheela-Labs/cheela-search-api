@@ -99,6 +99,17 @@ export function toResult(
 		passages: selectPassages(query, document),
 		capabilities: capabilities.length > 0 ? capabilities : undefined,
 		source: document.origin,
+		// Both omitted rather than sent empty. A surface that reads `structured`
+		// as "this page published nothing" and `undefined` as "we did not look"
+		// can tell an unmarked page from an external result; two empty arrays
+		// cannot say which happened.
+		structured:
+			document.structured.length > 0 ? document.structured : undefined,
+		description: document.description || undefined,
+		// Capped here rather than at the index: a long page has a hundred of
+		// these and a card shows six.
+		headings:
+			document.headings.length > 0 ? document.headings.slice(0, 12) : undefined,
 	};
 }
 

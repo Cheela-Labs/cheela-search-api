@@ -32,6 +32,31 @@ export type Generated = {
 	citations: Citation[];
 	/** Follow-up queries the surface can offer. */
 	suggestions: string[];
+	/**
+	 * A side-by-side table, asked for only on a comparison query.
+	 *
+	 * The surface has rendered these since it was built — `ComparisonCard` in
+	 * `blocks.tsx` — and nothing has ever produced one, because no field on the
+	 * response mapped to it. This is that field.
+	 *
+	 * It is the one thing here composed rather than extracted, and the surface
+	 * labels it so. Every cell is the model's reading of the sources it was
+	 * given, and a comparison is exactly the shape of answer where a confident
+	 * wrong cell is most expensive.
+	 */
+	comparison?: Comparison;
+};
+
+export type Comparison = {
+	/** What is being compared. Column headers, in order. */
+	subjects: string[];
+	rows: {
+		criterion: string;
+		/** One per subject, in the same order. Never shorter. */
+		cells: string[];
+		/** Indexes of the subjects the sources favour on this row. May be empty. */
+		best: number[];
+	}[];
 };
 
 const SYSTEM = `You answer a search query using only the sources provided.
@@ -41,7 +66,18 @@ Format your reply as:
 ANSWER: <two to five sentences answering the query, with citations>
 SUGGESTIONS: <up to three follow-up queries, separated by " | ">
 
+Only when the query compares two or more named things, add:
+
+COMPARE: <the things compared, separated by " | ">
+ROW: <criterion> | <value for the first thing> | <value for the second> | ...
+
 Rules:
+- One ROW line per criterion, at most six, each with exactly as many values as
+  COMPARE listed. Keep every value under eight words.
+- Mark a value the sources clearly favour by ending it with " *". Mark none if
+  the sources do not take a side; that is a real answer and a fabricated
+  preference is not.
+- Omit COMPARE and every ROW entirely unless the query actually compares things.
 - Cite with bracketed numbers matching the source numbers, like [1] or [2,3].
   Every factual claim needs one.
 - Use ONLY what the sources say. If they do not answer the query, say so
@@ -109,28 +145,75 @@ export function extractCitations(
 	};
 }
 
-function parse(reply: string): { answer: string; suggestions: string[] } {
+/** Splits a pipe-delimited line, trimming and dropping empties. */
+const pipes = (value: string): string[] =>
+	value
+		.split("|")
+		.map((entry) => entry.trim())
+		.filter(Boolean);
+
+export function parse(reply: string): {
+	answer: string;
+	suggestions: string[];
+	comparison?: Comparison;
+} {
 	let answer = "";
 	let suggestions: string[] = [];
+	let subjects: string[] = [];
+	const rows: NonNullable<Generated["comparison"]>["rows"] = [];
+	let seen = false;
 
 	for (const line of reply.split(/\r?\n/)) {
-		const match = /^\s*(ANSWER|SUGGESTIONS)\s*:\s*(.*)$/i.exec(line);
+		const match = /^\s*(ANSWER|SUGGESTIONS|COMPARE|ROW)\s*:\s*(.*)$/i.exec(
+			line,
+		);
 		if (!match) {
 			// Continuation of the answer, which the model often wraps.
-			if (answer && !suggestions.length) answer += ` ${line.trim()}`;
+			if (answer && !seen) answer += ` ${line.trim()}`;
 			continue;
 		}
-		if (match[1].toUpperCase() === "ANSWER") answer = match[2].trim();
-		else {
-			suggestions = match[2]
-				.split("|")
-				.map((entry) => entry.trim())
-				.filter(Boolean)
-				.slice(0, 3);
+		const key = match[1].toUpperCase();
+		if (key === "ANSWER") {
+			answer = match[2].trim();
+			continue;
+		}
+		seen = true;
+		if (key === "SUGGESTIONS") {
+			suggestions = pipes(match[2]).slice(0, 3);
+		} else if (key === "COMPARE") {
+			subjects = pipes(match[2]).slice(0, 4);
+		} else if (rows.length < 6) {
+			const parts = pipes(match[2]);
+			const criterion = parts.shift();
+			if (!criterion) continue;
+			const best: number[] = [];
+			const cells = parts.map((cell, index) => {
+				const starred = /\s\*$/.test(cell);
+				if (starred) best.push(index);
+				return starred ? cell.replace(/\s\*$/, "") : cell;
+			});
+			rows.push({ criterion, cells, best });
 		}
 	}
 
-	return { answer: answer.trim(), suggestions };
+	/*
+	  A table is only rendered when its shape is intact.
+
+	  The model is asked for exactly as many values per row as it named
+	  subjects, and when it does not comply the honest move is to drop the table
+	  rather than to pad it. A comparison table with a blank cell reads as "this
+	  product does not have that" — a claim nobody made.
+	*/
+	const complete =
+		subjects.length >= 2 &&
+		rows.length > 0 &&
+		rows.every((row) => row.cells.length === subjects.length);
+
+	return {
+		answer: answer.trim(),
+		suggestions,
+		...(complete ? { comparison: { subjects, rows } } : {}),
+	};
 }
 
 /**
@@ -213,7 +296,12 @@ export function createGenerator(deps: GeneratorDeps) {
 				}
 
 				const { text, citations } = extractCitations(parsed.answer, cited);
-				return { answer: text, citations, suggestions: parsed.suggestions };
+				return {
+					answer: text,
+					citations,
+					suggestions: parsed.suggestions,
+					comparison: parsed.comparison,
+				};
 			} catch (error) {
 				logger.warn(
 					{ error: (error as Error).message },
