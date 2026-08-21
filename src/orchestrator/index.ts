@@ -15,6 +15,7 @@ import type { Evolution } from "../services/evolution/index.js";
 import type { Generator } from "../services/generator/index.js";
 import type { Classifier } from "../services/intent/index.js";
 import { actOn } from "../services/intent/index.js";
+import { answerConversion } from "../services/intent/units.js";
 import { applyEntitySignals } from "../services/ranking/entity-aware.js";
 import {
 	markCited,
@@ -87,6 +88,49 @@ export async function runSearch(
 	);
 	const intent = actOn(classification);
 	if (classification.confidence === 0) degraded.push("intent");
+
+	// ---- Arithmetic --------------------------------------------------------
+	//
+	// A conversion is the one query this engine can answer completely on its
+	// own, and everything below this line makes it worse. Retrieval has nothing
+	// to find; the generator, handed news articles and asked about kilograms,
+	// writes an apology. Production answered "1 kg in pound" with "I am sorry,
+	// but the provided sources do not contain information about converting
+	// kilograms to pounds. They focus on news related to an earthquake in
+	// Colombia" — three model calls, four index queries and up to two paid
+	// provider calls, to be wrong.
+	//
+	// `results` is empty on purpose. The design's own line for this module is
+	// "COMPUTED LOCALLY · NO SOURCES NEEDED", and a citation here would claim
+	// somebody said this rather than that it is true. The surface renders the
+	// converter from the query text; the sentence is here so a client that is
+	// not our surface still gets the number.
+	if (classification.conversion) {
+		return {
+			answer: answerConversion(classification.conversion),
+			results: [],
+			capabilities: [],
+			citations: [],
+			followUp: context.followUp,
+			intent: {
+				intent: classification.intent,
+				confidence: classification.confidence,
+				entities: classification.entities,
+			},
+			entities: [],
+			sessionId: context.sessionId,
+			meta: {
+				latencyMs: Date.now() - started,
+				// Nothing retrieved it. "index" is the least wrong of the three
+				// the contract allows, and it is read by the crawl scheduler as a
+				// demand signal — reporting "external" would ask the crawler to go
+				// and fetch pages about arithmetic.
+				servedFrom: "index",
+				hypotheses: [],
+				degraded,
+			},
+		};
+	}
 
 	// ---- Evolution ---------------------------------------------------------
 

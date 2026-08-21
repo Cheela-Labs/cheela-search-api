@@ -7,6 +7,7 @@ import {
 import type { TextModel } from "../../infra/model/index.js";
 import { config } from "../../shared/config.js";
 import { logger } from "../../shared/logger.js";
+import { type Conversion, parseConversion } from "./units.js";
 
 /**
  * The Intent Engine.
@@ -31,6 +32,8 @@ import { logger } from "../../shared/logger.js";
  * would make an implementation detail part of the API the first time somebody
  * serialised it.
  */
+export type { Conversion };
+
 export type Navigation = {
 	/** The name recognised, when a name was. A typed hostname resolves no name. */
 	entity?: string;
@@ -39,7 +42,14 @@ export type Navigation = {
 	officialUrl?: string;
 };
 
-export type ClassifiedQuery = Classification & { navigation?: Navigation };
+export type ClassifiedQuery = Classification & {
+	navigation?: Navigation;
+	/**
+	 * Present when the query is arithmetic. The orchestrator answers it directly
+	 * and skips retrieval entirely — there is nothing on the web to retrieve.
+	 */
+	conversion?: Conversion;
+};
 
 export type Classifier = (
 	query: string,
@@ -59,6 +69,8 @@ export type Structural = {
 	entity?: string;
 	officialDomain?: string;
 	officialUrl?: string;
+	/** Set when the query is a unit conversion, which needs no model and no index. */
+	conversion?: Conversion;
 } | null;
 
 /**
@@ -139,6 +151,18 @@ export function classifyStructurally(
 	deps?: StructuralDeps,
 ): Structural {
 	const trimmed = query.trim();
+
+	// A conversion, before anything else and before any model.
+	//
+	// The same argument the hostname rule makes below: arithmetic is not a
+	// guess, and nothing a language model says about "1 kg in pound" would
+	// improve it. Until this existed the query classified as `information`,
+	// retrieved news, and had a model write "I am sorry, but the provided
+	// sources do not contain information about converting kilograms to pounds"
+	// — at the cost of three model calls, four index queries and up to two paid
+	// provider calls.
+	const conversion = parseConversion(trimmed);
+	if (conversion) return { intent: "utility", conversion };
 
 	if (!/\s/.test(trimmed)) {
 		const match = HOSTNAME.exec(trimmed);
@@ -257,6 +281,7 @@ export function createClassifier(
 				intent: structural.intent,
 				confidence: 1,
 				entities: structural.entity ? [structural.entity] : [],
+				...(structural.conversion ? { conversion: structural.conversion } : {}),
 				// Keyed on the domain alone, not on the domain *and* a name. A
 				// typed hostname resolves the most precise destination there is
 				// and recognises no entity, so requiring both meant `redis.io`
